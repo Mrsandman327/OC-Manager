@@ -466,6 +466,11 @@ export function isInternalUserMessage(item) {
     const info = item?.info || item || {};
     const role = info.role || info.author || '';
     if (role !== 'user') return false;
+    // 新数据优先按顶层消息类型判定：与 v2compat.isInternalInstructionMessage 同规则，
+    // 非 user 类型（如 role 被兼容归一为 system/user 的 synthetic 通知）不能因正文
+    // 带内部标记而被误过滤；旧缓存没有 messageType，继续走下方 role + 特征判定。
+    const messageType = info.messageType;
+    if (messageType && messageType !== 'user') return false;
     const parts = item?.parts;
     if (!parts || (Array.isArray(parts) && parts.length === 0)) return true;
     const text = messageText(item);

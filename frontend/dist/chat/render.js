@@ -120,6 +120,8 @@ setInterval(refreshLiveToolDurations, 200);
 /** 构建 synthetic 系统通知的折叠块（主消息流内，所有 synthetic 消息统一使用）。
  *  数据来源：v2compat.js adaptMessage / adaptEvent 对 synthetic 消息写入的
  *  info.syntheticNotice（description 摘要 + state 终态），正文由该消息的 text part 提供。
+ *  标题优先使用 description（服务端/插件给的稳定摘要），没有时才用清理后的正文摘要；
+ *  description 已作为标题展示，展开区不再重复输出。
  *  外观：卡片本体是外层 .oc-message.system（系统卡，含「系统」角色行），
  *  此函数只生成卡内折叠块 + 右下角时间（时间行复用 .oc-message-time 的样式与位置）。
  *  折叠块视觉/交互对齐「思考过程」折叠款（.oc-reasoning）：标题行点击展开/收起，
@@ -192,21 +194,25 @@ function buildSyntheticNoticeCard(info, partList) {
     const fold = document.createElement('div');
     fold.className = 'oc-part oc-synthetic-fold';
 
-    // 正文 part：摘要行用 text 首行，展开区保留 text 全文
+    // 正文 part：标题/摘要用清理后的纯文本，展开区保留 text 全文（markdown 正常渲染）
     const textPart = (Array.isArray(partList) ? partList : []).find(p => p && p.type === 'text');
     const noticeText = textPart ? String(textPart.text || '') : '';
-    // 摘要行只取纯文本：去掉可能的标签（如 <shell …>）并固定最大长度，超出省略
+    // 摘要只取纯文本：去掉可能的标签（如 <shell …>）并固定最大长度，超出省略
     const plainText = noticeText.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
     const headline = plainText.length > 100 ? plainText.slice(0, 100) + '…' : plainText;
+    // 标题优先 description（稳定摘要，如「子任务已完成」）；旧消息没有 description 时
+    // 才退回清理后的正文摘要，避免标题丢失。
+    const description = String(notice.description || '').trim();
+    const title = description || ('系统通知' + (headline ? '：' + headline : ''));
 
-    // 摘要行：图标 + 「系统通知：<text>」+ 状态（原样英文，圆点样式）+ 展开
+    // 摘要行：图标 + 标题 + 状态（原样英文，圆点样式）+ 展开
     const head = document.createElement('div');
     head.className = 'oc-synthetic-head';
     head.innerHTML = iconSvg('i-inbox');
     const label = document.createElement('span');
     label.className = 'oc-synthetic-label';
-    label.textContent = '系统通知' + (headline ? '：' + headline : '');
-    label.title = noticeText;
+    label.textContent = title;
+    label.title = description || noticeText;
     head.appendChild(label);
     // 状态：有 metadata.state 才显示，文字用服务端原值，样式复用工具卡状态圆点
     if (notice.state) {
@@ -216,29 +222,28 @@ function buildSyntheticNoticeCard(info, partList) {
         stateEl.textContent = String(notice.state);
         head.appendChild(stateEl);
     }
+    // 只有存在正文时才提供展开；description 已作为标题展示，展开区不再重复输出。
+    const hasBody = !!noticeText.trim();
     const toggle = document.createElement('span');
     toggle.className = 'oc-synthetic-toggle';
-    toggle.textContent = expanded ? '收起' : '展开';
-    head.appendChild(toggle);
+    if (hasBody) {
+        toggle.textContent = expanded ? '收起' : '展开';
+        head.appendChild(toggle);
+    }
 
-    // 展开区：默认折叠；正文 = text 全文 + description（如果有）
+    // 展开区：默认折叠；正文 = text 全文
     const bodyEl = document.createElement('div');
     bodyEl.className = 'oc-synthetic-body' + (expanded ? '' : ' hidden');
-    if (textPart) bodyEl.appendChild(renderTextPart(textPart));
-    const description = String(notice.description || '').trim();
-    if (description) {
-        const descEl = document.createElement('div');
-        descEl.className = 'oc-synthetic-desc';
-        descEl.textContent = '描述：' + description;
-        bodyEl.appendChild(descEl);
+    if (hasBody && textPart) bodyEl.appendChild(renderTextPart(textPart));
+    if (hasBody) {
+        head.addEventListener('click', () => {
+            store.expandedParts[key] = !store.expandedParts[key];
+            bodyEl.classList.toggle('hidden', !store.expandedParts[key]);
+            toggle.textContent = store.expandedParts[key] ? '收起' : '展开';
+        });
     }
-    head.addEventListener('click', () => {
-        store.expandedParts[key] = !store.expandedParts[key];
-        bodyEl.classList.toggle('hidden', !store.expandedParts[key]);
-        toggle.textContent = store.expandedParts[key] ? '收起' : '展开';
-    });
     fold.appendChild(head);
-    fold.appendChild(bodyEl);
+    if (hasBody) fold.appendChild(bodyEl);
     wrapper.appendChild(fold);
 
     return wrapper;
@@ -272,7 +277,12 @@ function messageRenderSignature(item) {
     if (info.error) {
         sig += '|err:' + String(typeof info.error === 'string' ? info.error : (info.error.message || ''));
     }
-    if (info.syntheticNotice) sig += '|synthetic';
+    if (info.syntheticNotice) {
+        // 标题优先 description、状态来自 metadata.state：两者变化必须触发重建，
+        // 否则同一条 synthetic 通知在实时/历史合并后可能仍显示旧标题。
+        sig += '|synthetic|' + String(info.syntheticNotice.description || '') +
+            '|' + String(info.syntheticNotice.state || '');
+    }
     return sig;
 }
 

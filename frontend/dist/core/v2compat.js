@@ -338,22 +338,41 @@ function filePartFromAttachment(f, sessionID, messageID, id) {
     return part;
 }
 
-/** 剥离服务端 synthetic 正文的包装标签：`<subagent ...>…</subagent>` 外层与 `<summary>` 包裹。
- *  服务端落库文本形如 `<subagent ...>\n<summary>\n报告（markdown）\n</subagent>`，其中
- *  `<summary>` 常未闭合——HTML 解析时会把后续所有内容吞进 summary 元素、导致正文被"压平"
- *  （标题/列表等块级结构全部丢失、连成一段）。在适配层剥离包装，正文保持原始 markdown，
- *  交给 render.js 的 renderTextPart（marked + 白名单清洗）正常渲染。
- *  只锚定首尾，不误伤正文内部的同类标签。 */
+/** synthetic 正文可能出现的首尾包装标签（官方与本机插件/工具落库的文本）：
+ *   - subagent：`<subagent ...>…</subagent>` 子任务报告；
+ *   - summary：`<summary>…</summary>`（常未闭合——HTML 解析会把后续内容吞进 summary，
+ *     导致标题/列表等块级结构被"压平"，所以在适配层先剥离）；
+ *   - shell：`<shell id state command>…</shell>` 后台命令通知；
+ *   - codemode：`<codemode>…</codemode>` 代码模式结果；
+ *   - system-reminder：`<system-reminder>…</system-reminder>` 系统提醒；
+ *   - image：`<image ...>…</image>` 图片附件包装。 */
+const SYNTHETIC_WRAPPER_OPEN_RE = /^\s*<(subagent|summary|shell|codemode|system-reminder|image)\b[^>]*>\s*/i;
+
+/** 剥离服务端 synthetic 正文的包装标签。
+ *  只锚定首尾，正文保持原始 markdown，交给 render.js 的 renderTextPart
+ *  （marked + 白名单清洗）正常渲染；正文中间出现的同名标签不动，避免误伤
+ *  Markdown/代码块内容。
+ *
+ *  外层可能嵌套（如 `<codemode><summary>…</summary></codemode>`），而一次链式
+ *  replace 按固定标签顺序执行时，内层标签可能在外层尚未剥离前匹配不到首尾，
+ *  导致残留。因此改为「每轮只剥当前最外层，循环到无可剥」：
+ *   1) 匹配行首的开标签并剥掉；
+ *   2) 仅当刚才剥的是同名开标签时，才剥行尾的同名闭标签——避免误删正文末尾
+ *      一个没有对应开标签的孤立闭标签（Markdown/HTML 正文的一部分）；
+ *   3) 未闭合的 <summary> 仍能剥掉开标签（服务端常见形态），不受第 2 步影响。
+ *  循环上限按标签种类数放宽到 32 轮，防御异常输入造成死循环。 */
 function stripSyntheticWrapper(text) {
     if (!text) return '';
-    return String(text)
-        .replace(/^\s*<subagent\b[^>]*>\s*/i, '')
-        .replace(/<\/subagent>\s*$/i, '')
-        .replace(/^\s*<summary>\s*/i, '')
-        .replace(/<\/summary>\s*$/i, '')
-        // 后台 shell 通知：<shell id state command>正文</shell>，只保留正文
-        .replace(/^\s*<shell\b[^>]*>\s*/i, '')
-        .replace(/<\/shell>\s*$/i, '');
+    let out = String(text);
+    for (let guard = 0; guard < 32; guard++) {
+        const match = out.match(SYNTHETIC_WRAPPER_OPEN_RE);
+        if (!match) break;
+        out = out.replace(SYNTHETIC_WRAPPER_OPEN_RE, '');
+        // 闭标签必须与刚剥掉的开标签同名，且只能位于行尾；
+        // 用 i 标志兼容服务端可能返回的大写标签名。
+        out = out.replace(new RegExp('</' + match[1] + '>\\s*$', 'i'), '');
+    }
+    return out;
 }
 
 /** v2 的单条消息 → v1 的 {info, parts}。 */
@@ -364,6 +383,10 @@ function adaptMessage(msg, sessionID) {
         sessionID,
         time: msg.time,
         error: errorText(msg.error) || undefined,
+        // v2 顶层消息类型（user / assistant / system / synthetic / skill / shell / compaction …）。
+        // role 仍按既有契约归一（system/synthetic → 'system'），渲染分发不变；
+        // messageType 用于区分「官方 system 内部指令」与 synthetic 通知，避免误过滤。
+        messageType: msg.type,
     };
 
     if (msg.type === 'user') {
@@ -407,9 +430,9 @@ function adaptMessage(msg, sessionID) {
 
     // synthetic 合成通知（子任务完成 / 回复中断自动继续 / 未来其它）：v2 的 synthetic
     // 消息统一渲染为通用折叠通知块（render.js buildSyntheticNoticeCard），不做 source 专用识别。
-    // description 作为摘要行文案（info.syntheticNotice.description），
-    // metadata.state 作为摘要行状态（completed / failed / interrupted，其它值原样显示）；
-    // 正文只放 text（description 不再拼进正文，避免与摘要行重复）。
+    // description 作为标题（info.syntheticNotice.description，缺省时渲染层退回正文摘要），
+    // metadata.state 作为标题行状态（completed / failed / interrupted，其它值原样显示）；
+    // 正文只放 text（description 不再拼进正文，避免与标题重复）。
     // 完全无 text 也无 description 的 synthetic 仍丢弃（与旧行为一致，避免空卡片）。
     if (msg.type === 'synthetic') {
         // 剥离服务端包装（<subagent ...>/<summary>）——正文保持 markdown，交由渲染层正常渲染
@@ -532,8 +555,32 @@ export function adaptInboxMessages(sessionID, res) {
         if (!item || !item.id) return;
         // inbox 里也可能有其他类型的排队项（命令等），这里只认用户提示词
         if (item.type && item.type !== 'user') return;
-        const text = (item.payload && item.payload.text) || item.text || '';
-        if (!text) return;
+        const payload = item.payload || {};
+        // 官方 v2 允许 text 为空、files 有值（纯附件提示词），因此不能用 text 是否存在
+        // 作为丢弃条件；只要正文或附件任一存在就还原为一条用户消息。
+        const text = typeof payload.text === 'string'
+            ? payload.text
+            : (typeof item.text === 'string' ? item.text : '');
+        const files = Array.isArray(payload.files)
+            ? payload.files
+            : (Array.isArray(item.files) ? item.files : []);
+        const parts = [];
+        // 正文在前、附件在后：与 adaptMessage 的历史投影顺序一致，
+        // 避免同一输入在实时/历史两条路径下附件位置翻转。
+        if (text) {
+            parts.push({
+                id: item.id + '_text',
+                messageID: item.id,
+                sessionID: sessionID,
+                type: 'text',
+                text: text,
+            });
+        }
+        files.forEach(function (f, i) {
+            if (!f || typeof f !== 'object') return;
+            parts.push(filePartFromAttachment(f, sessionID, item.id, item.id + '_file_' + i));
+        });
+        if (!parts.length) return;
         out.push({
             info: {
                 id: item.id,
@@ -542,15 +589,9 @@ export function adaptInboxMessages(sessionID, res) {
                 time: item.time || { created: Date.now() },
                 // inbox:true 供渲染层识别「尚未执行」，不影响现有字段读取
                 inbox: true,
-                delivery: item.delivery || '',
+                delivery: item.delivery || payload.delivery || '',
             },
-            parts: [{
-                id: item.id + '_text',
-                messageID: item.id,
-                sessionID: sessionID,
-                type: 'text',
-                text: text,
-            }],
+            parts: parts,
         });
     });
     // 队列按提交顺序返回（旧→新），与缓存/渲染的排序假定一致，不需要反转
@@ -572,7 +613,7 @@ export function nextCursor(res) {
 // ============================
 
 /**
- * 判断一条（已还原的）消息是否属于「内部指令/合成内容」，不应作为聊天消息渲染。
+ * 判断一条（已还原的）消息是否属于「内部指令」，不应作为聊天消息渲染。
  *
  * 已知来源（由 opencode v2 服务端实现确认）：
  *  - session.instructions.updated 事件带 text 时，服务端会落一条 system 消息：
@@ -581,9 +622,13 @@ export function nextCursor(res) {
  *  - 官方客户端对这类 system 消息只显示 description 一行，不展示完整正文。
  *
  * 判定保持保守（宁可漏过滤，也不误伤正常回答）：
- *  1) 只处理 role==='system' 的消息——adaptMessage 把 v2 的 system/synthetic 统一还原为该角色；
- *     用户自己在提问里引用同类文本（role==='user'）不受影响；
- *  2) 只命中两个强特征：文本以 'Instructions updated:' 开头（服务端固定前缀），
+ *  1) 只处理 role==='system' 的消息——adaptMessage 把 v2 的 system/synthetic 统一还原为该角色，
+ *     所以 role 不能作为"内部指令"的充分条件；
+ *  2) 新数据优先看 info.messageType：只有官方 system 消息才继续做正文强特征判定，
+ *     synthetic / skill / shell / compaction 等即使 role==='system' 也必须保留；
+ *  3) 旧缓存没有 messageType：synthetic 通知以 info.syntheticNotice 标记（必须放行），
+ *     其余仍按正文强特征保守过滤；
+ *  4) 只命中两个强特征：文本以 'Instructions updated:' 开头（服务端固定前缀），
  *     或包含 Code Mode 工具目录标题 'The Code Mode tool catalog'。
  * 调用方只跳过渲染，数据仍保留在缓存与接口响应里，便于以后排查。
  */
@@ -591,6 +636,15 @@ export function isInternalInstructionMessage(item) {
     const info = item?.info || item || {};
     const role = info.role || info.author || '';
     if (role !== 'system') return false;
+    // 新缓存：以顶层消息类型为准，只允许官方 system 进入强特征判定。
+    const messageType = info.messageType;
+    if (messageType) {
+        if (messageType !== 'system') return false;
+    } else if (info.syntheticNotice) {
+        // 旧缓存（无 messageType）：synthetic 通知带 syntheticNotice，不能因正文含
+        // Code Mode 目录之类的内部说明而被误杀；其余旧 system 消息仍按强特征兼容过滤。
+        return false;
+    }
     const parts = item?.parts;
     const list = Array.isArray(parts) ? parts : (parts ? [parts] : []);
     // 与 utils.messageText 同构的轻量提取（本模块保持零依赖，便于 Node 测试直接导入）
@@ -642,16 +696,39 @@ export function adaptEvent(event) {
             if (data.item?.type !== 'user') return [];
             const msgID = data.inboxID;
             const payload = data.item.payload || {};
-            const text = payload.text || '';
+            // 与历史投影 adaptInboxMessages 完全同构：text 可空、files 有值时仍是有效消息；
+            // 正文 part 只在 text 非空时生成，避免纯附件消息多出一个空文本块。
+            const text = typeof payload.text === 'string'
+                ? payload.text
+                : (typeof data.item.text === 'string' ? data.item.text : '');
+            const files = Array.isArray(payload.files)
+                ? payload.files
+                : (Array.isArray(data.item.files) ? data.item.files : []);
             const out = [
-                { type: 'message.updated', info: { id: msgID, sessionID, role: 'user', time: { created: event.created } } },
-                // 正文先于附件落 part：历史投影（adaptMessage）也是正文在前、附件在后，
-                // 实时顺序必须一致，否则同一条带图消息刷新前后附件位置会翻转。
-                { type: 'message.part.updated', part: { id: msgID + '_text', messageID: msgID, sessionID, type: 'text', text } },
+                {
+                    type: 'message.updated',
+                    info: {
+                        id: msgID,
+                        sessionID,
+                        role: 'user',
+                        time: { created: event.created },
+                        // 与历史路径一致：让渲染层知道这是排队中的提示词
+                        inbox: true,
+                        delivery: data.item.delivery || payload.delivery || '',
+                    },
+                },
             ];
+            // 正文先于附件落 part：历史投影（adaptMessage）也是正文在前、附件在后，
+            // 实时顺序必须一致，否则同一条带图消息刷新前后附件位置会翻转。
+            if (text) {
+                out.push({
+                    type: 'message.part.updated',
+                    part: { id: msgID + '_text', messageID: msgID, sessionID, type: 'text', text },
+                });
+            }
             // 附件：服务端入队事件自带完整 files（含 inline data），必须一并落成 file part，
             // 否则 upsertPart 在首个文本 part 到达时清掉本地乐观附件，图片会消失。
-            (payload.files || []).forEach((f, i) => {
+            files.forEach((f, i) => {
                 if (!f || typeof f !== 'object') return;
                 out.push({
                     type: 'message.part.updated',
@@ -873,6 +950,8 @@ export function adaptEvent(event) {
             return [
                 { type: 'message.updated', info: {
                     id: msgID, sessionID, role: 'system', time: { created: event.created },
+                    // 与历史适配同构：明确标记 synthetic，渲染层的内部指令过滤只认 system
+                    messageType: 'synthetic',
                     syntheticNotice: {
                         description: data.description || '',
                         state: (data.metadata && data.metadata.state) || '',
@@ -890,7 +969,11 @@ export function adaptEvent(event) {
             const text = [title ? '**' + title + '**' : '', data.text || ''].filter(Boolean).join('\n');
             if (!text) return [];
             return [
-                { type: 'message.updated', info: { id: msgID, sessionID, role: 'system', time: { created: event.created } } },
+                { type: 'message.updated', info: {
+                    id: msgID, sessionID, role: 'system', time: { created: event.created },
+                    // 技能激活记录不是内部指令：与历史适配一致标记 skill，避免被误过滤
+                    messageType: 'skill',
+                } },
                 { type: 'message.part.updated', part: { id: msgID + '_text', messageID: msgID, sessionID, type: 'text', text } },
             ];
         }
@@ -920,13 +1003,37 @@ export function adaptEvent(event) {
                 { type: 'session.error', sessionID, error: errorText(data.error) },
             ];
 
-        // 单个 step 失败（如模型调用报错）：服务端会把 error 记入 assistant 消息，
-        // 但事件流层面先直接提示，避免消息列表尚未刷新时界面上看不到任何失败信号。
-        // finish 用于兜底文案（error 缺 message 时至少说明中止原因）。
+        // 单个 step 失败（如模型调用报错）：服务端会把 error / finish / 用量记入 assistant
+        // 消息。事件流必须同步回写该消息，否则失败卡片要等历史刷新才出现（服务端落库可能
+        // 延迟）；同时保留 session.error，用于即时 toast 与消息尚无宿主时的兜底错误行。
+        // 注意：这不是会话终止——不产生 session.idle，也不改变重试语义（重试由
+        // status/retry.scheduled 事件驱动）。
         case 'session.step.failed': {
+            const msgID = data.assistantMessageID;
             const msg = errorText(data.error) || (data.finish ? '模型输出被中止（' + data.finish + '）' : '');
-            if (!msg) return [];
-            return [{ type: 'session.error', sessionID, error: msg }];
+            const out = [];
+            if (msgID) {
+                const info = {
+                    id: msgID,
+                    sessionID,
+                    role: 'assistant',
+                    // 保持既有 error 字符串契约（render.js 直接按字符串读取）
+                    error: msg,
+                    finish: data.finish,
+                    rawFinish: data.rawFinish,
+                    cost: data.cost,
+                    tokens: data.tokens,
+                    // 失败时刻即该 step 的完成时间；不写 time.created，避免覆盖已缓存的创建时间
+                    time: { completed: event.created },
+                };
+                // snapshot/files 目前没有对应 part 形态：先作为明确的附加字段随消息保留，
+                // 不伪造 part、不影响现有渲染。
+                if (data.snapshot !== undefined) info.snapshot = data.snapshot;
+                if (Array.isArray(data.files) && data.files.length) info.files = data.files;
+                out.push({ type: 'message.updated', info });
+            }
+            if (msg) out.push({ type: 'session.error', sessionID, error: msg });
+            return out;
         }
 
         // 会话运行状态（idle | retry | busy，retry 带 attempt/message）：
