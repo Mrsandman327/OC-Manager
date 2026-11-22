@@ -15,7 +15,7 @@ import { api } from '../core/apicall.js';
 import { showToast, escapeHtml, safeText, isDesktopRuntime, loadWailsRuntime, refreshServiceStatus, loadMessages, refreshSessionTitle, selectSession, loadAgentModelSelectors, notePromptActivity, buildTree, wasSessionDeletedLocally, getCachedMessages } from '../core/utils.js';
 import { setSessionStatus, isBusyStatus } from './render.js';
 import { scheduleRenderCachedMessages, upsertMessage, upsertPart, applyPartDelta, removePart, removeMessage } from './cache.js';
-import { scheduleSubtaskExtraction } from './sidepanel.js';
+import { scheduleSubtaskExtraction, scheduleSubtaskActivityRefresh } from './sidepanel.js';
 import { showPermissionRequest, closePermissionModal, isOpenOrSubtask } from './permission.js';
 import { adaptEvent, normalizeStatuses } from '../core/v2compat.js';
 
@@ -75,6 +75,14 @@ function dispatchV2Event(v2event) {
     if (v2sid && isBusyActivityEvent(v2type)) {
         setSessionStatus(v2sid, 'busy', 'activity');
     }
+    // 子任务活动/终止也要触发父会话的子任务面板刷新：
+    // 子会话事件携带的是自己的 sessionID，而面板只展示当前父会话的 child sessions。
+    // scheduleSubtaskActivityRefresh 会按 child -> parent 关系定位父会话；
+    // 面板请求仍走 RAF + 900ms 节流，不会每个 tool delta 都打请求。
+    // 终止事件（succeeded/failed/interrupted）同样需要刷新，让卡片从「运行中」落到最终状态。
+    if (v2sid && (isBusyActivityEvent(v2type) || isExecutionEndEvent(v2type))) {
+        scheduleSubtaskActivityRefresh(v2sid);
+    }
     const v1events = adaptEvent(v2event);
     for (const e of v1events) handleOcEvent(e);
     // 任何模型/agent 活动都说明本次发送没有石沉大海：刷新无响应看门狗的基线
@@ -90,6 +98,12 @@ function dispatchV2Event(v2event) {
 function isBusyActivityEvent(type) {
     if (type === 'session.inbox.enqueued' || type === 'session.execution.started') return true;
     return /^session\.(text|reasoning|tool|step)\./.test(type || '');
+}
+
+/** 是否执行终止事件（成功/失败/中断）：用于把子任务卡片从运行中刷新为最终状态。
+ *  与 isBusyActivityEvent 互斥，二者合起来覆盖一次子任务运行的开始、过程和结束。 */
+function isExecutionEndEvent(type) {
+    return /^session\.execution\.(succeeded|failed|interrupted)$/.test(type || '');
 }
 
 /** v2 事件是否代表「模型/agent 有活动」——用于取消发送后的无响应看门狗。

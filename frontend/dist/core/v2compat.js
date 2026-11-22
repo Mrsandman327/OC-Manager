@@ -226,7 +226,9 @@ function toolOutput(content) {
  *  end 取 completed；同时兼容已是 v1 形态（start/end）的输入。 */
 function toSpanTime(time) {
     if (!time || typeof time !== 'object') return undefined;
-    const start = time.created ?? time.ran ?? time.start;
+    // 工具真实执行起点优先使用 ran；没有 ran 时才回退到参数生成起点 created。
+    // 这样历史消息与实时事件统一为 ran → completed，避免同一工具刷新前后耗时口径变化。
+    const start = time.ran ?? time.created ?? time.start;
     const end = time.completed ?? time.end;
     if (start == null && end == null) return undefined;
     const out = {};

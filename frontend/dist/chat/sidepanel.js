@@ -8,10 +8,13 @@
 import { api } from '../core/apicall.js';
 import { store, currentDir } from '../core/state.js';
 import { escapeHtml, showToast, showApiError, getActiveMessagesEl, getCachedMessages, modelDisplayLabel, setTodoPanelRefreshHandler, copyToClipboard, bindOverlayClose } from '../core/utils.js';
-import { adaptMessages, formatApiError, unwrapList, nextCursor } from '../core/v2compat.js';
+import { adaptMessages, formatApiError, unwrapList, nextCursor, normalizeStatuses } from '../core/v2compat.js';
 // 时间格式化统一走 core/format.js
 import { formatSubtaskDuration, formatMinuteTime } from '../core/format.js';
 import { buildMessageNode, setRenderTodosHandler } from './render.js';
+// 复用权限模块已有的 parentID 回溯缓存：子会话活动事件按 child -> parent 定位父面板时使用。
+// 该模块只依赖 core 层，不构成循环导入。
+import { resolveOpenOwner } from './permission.js';
 
 // 向 render.js 注入"消息渲染完成后刷新待办面板"的回调（sidepanel→render 单向依赖，无环）。
 // 同时向 core 层注册"待办面板刷新"入口：service.js 在服务状态变化后触发。
@@ -148,15 +151,73 @@ const CHILD_SESSION_STATUS_MAP = {
     interrupted: 'interrupt',
 };
 
+/** 子任务的父会话关系缓存：childSessionId -> parentSessionId。
+ *  来源有两个：refreshSubtaskPanel 拉取 child sessions 列表时写入；
+ *  子会话活动事件找不到关系时，经 permission.js 的 resolveOpenOwner 回溯 parentID 后写入。
+ *  目的：子会话的 SSE 事件只带自己的 sessionID，需要据此定位并刷新当前父会话的面板。 */
+const subtaskParentByChild = new Map();
+
+/** 正在异步回溯父子关系的 child ID 集合（防重入）。
+ *  子会话 tool delta 事件非常密集；关系未知时只允许一个查询在途，后续事件直接跳过，
+ *  避免每个 delta 都向 /api/session/{child} 打一次请求。 */
+const subtaskParentResolving = new Set();
+
+/** 本轮运行的起始时间缓存：childSessionId -> 前端首次观察到它处于 active 的时间戳。
+ *  子会话被复用（已完成后再运行）时，服务端 time.created 仍是首次创建时间，
+ *  不能用来计算本次时长；这里以「本轮首次观察 active」作为这一轮的起点。 */
+const subtaskRunStartedAt = new Map();
+
+/** 已结束的「本轮运行」记录：childSessionId -> { startedAt, endedAt, durationMs }。
+ *  子会话退出 active 时把「本轮起点 -> 退出时刻」保存于此，刷新时继续显示本次时长，
+ *  避免回落到 created→updated 的整个历史生命周期；弹窗的开始/结束时间也使用本轮时间。 */
+const subtaskFinishedRun = new Map();
+
+/** 把多种形态的活跃状态输入归一成 child session ID 集合（纯函数）。
+ *  接受 Set / 数组 / 对象：
+ *   - Set/数组：直接视为活跃 ID；
+ *   - 对象：兼容 /api/session/active 的原始形态 {sid:{type:'running'}}，
+ *     也兼容 normalizeStatuses 之后的 {sid:'busy'}。
+ *  仅 running/busy/retry/true 视为活跃；idle、未知值一律忽略。 */
+export function normalizeActiveSessionIds(activeStatuses) {
+    const ids = new Set();
+    if (!activeStatuses) return ids;
+    if (activeStatuses instanceof Set) {
+        activeStatuses.forEach(function(id) {
+            if (typeof id === 'string' && id) ids.add(id);
+        });
+        return ids;
+    }
+    if (Array.isArray(activeStatuses)) {
+        activeStatuses.forEach(function(id) {
+            if (typeof id === 'string' && id) ids.add(id);
+        });
+        return ids;
+    }
+    if (typeof activeStatuses !== 'object') return ids;
+    Object.keys(activeStatuses).forEach(function(id) {
+        const value = activeStatuses[id];
+        const key = (value && typeof value === 'object')
+            ? (value.type != null ? value.type : value.status)
+            : value;
+        if (key === true || key === 'running' || key === 'busy' || key === 'retry') ids.add(id);
+    });
+    return ids;
+}
+
 /** 把服务端 child session 数组归一化为面板卡片摘要（纯函数，便于单测）。
+ *  activeStatuses（可选）是当前活跃会话集合（Set/数组/对象，见 normalizeActiveSessionIds）：
+ *  active 中的 child 必须覆盖历史 outcome，强制标记为 running——
+ *  已完成子会话被复用再次运行时，服务端 outcome 仍是 succeeded，不能据此显示「已完成」。
+ *  非 active 的子会话保持 outcome 映射（completed/error/interrupt）不变。
  *  字段逐一对应 renderSubtaskCard / fillModalSummary 的读取项：
  *  - childSessionId/title/agent/model/status/durationMs 来自列表字段；
  *  - 列表没有消息上下文（parentMessageId/taskPartId）与输入输出预览，置空串——
  *    卡片点击改走「消息缓存反查」（findCachedSubtaskPart）定位父消息，
  *    反查未命中时打开详情弹窗兜底，不再依赖这两个字段（见 onSubtaskCardClick）。
  *  输出顺序：按 time.updated 降序（新→旧，最新在最上面）。 */
-export function mapChildSessionsToSummaries(list) {
+export function mapChildSessionsToSummaries(list, activeStatuses) {
     const children = Array.isArray(list) ? list : [];
+    const activeIds = normalizeActiveSessionIds(activeStatuses);
     // 面板排序：按 time.updated 降序（后执行的在前、**最新在最上面**）。
     // 缺 time.updated 的项以 0 参与比较（排最后）；slice() 复制副本，避免修改调用方数组。
     const sorted = children.slice().sort((a, b) => (Number(b?.time?.updated) || 0) - (Number(a?.time?.updated) || 0));
@@ -167,22 +228,31 @@ export function mapChildSessionsToSummaries(list) {
         const providerID = s?.model?.providerID || '';
         const modelID = s?.model?.id || '';
         const modelRef = (providerID && modelID) ? (providerID + '/' + modelID) : '';
+        const childSessionId = s?.id || '';
+        // 活跃快照优先级最高：已完成子会话被复用再次运行时 outcome 仍是 succeeded，
+        // 只凭 outcome 会把正在运行的卡片误显示为「已完成」。
+        const isActive = !!childSessionId && activeIds.has(childSessionId);
+        // outcome 是 v2 会话「结束」时才落盘的字段，缺失时必须区分两种情形：
+        //  - v2 会话（创建时即带 permissions 配置）→ outcome 还没写 = 仍在运行中；
+        //  - v1 时代继承的旧会话（无 permissions，永远不会写 outcome）→ 中性「已结束」。
+        const outcomeStatus = s?.outcome
+            ? (CHILD_SESSION_STATUS_MAP[s.outcome] || 'running')
+            : (Array.isArray(s?.permissions) ? 'running' : 'ended');
         return {
-            childSessionId: s?.id || '',
+            childSessionId: childSessionId,
             title: s?.title || '未知任务',
             description: '',
             agent: s?.agent || 'unknown',
             model: modelRef ? modelDisplayLabel(modelRef) : 'unknown',
-            // outcome 是 v2 会话「结束」时才落盘的字段，缺失时必须区分两种情形：
-            //  - v2 会话（创建时即带 permissions 配置）→ outcome 还没写 = 仍在运行中；
-            //  - v1 时代继承的旧会话（无 permissions，永远不会写 outcome）→ 中性「已结束」。
-            status: s?.outcome
-                ? (CHILD_SESSION_STATUS_MAP[s.outcome] || 'running')
-                : (Array.isArray(s?.permissions) ? 'running' : 'ended'),
-            durationMs: hasTime ? (updated - created) : null,
-            interrupted: s?.outcome === 'interrupted',
-            startedAt: hasTime ? created : null,
-            endedAt: hasTime ? updated : null,
+            status: isActive ? 'running' : outcomeStatus,
+            // durationMs 不在这里用 created→updated 拼「生命周期」：运行中的时长由
+            // applySubtaskRunTiming 按本轮首次 active 观察时间计算；已完成项优先使用
+            // 本轮观察到的时长，只有从未观察过运行的旧历史项才保留服务端时间差兜底。
+            durationMs: isActive ? null : (hasTime ? (updated - created) : null),
+            interrupted: !isActive && s?.outcome === 'interrupted',
+            // 运行中卡片必须使用本轮起点；其余情况先给服务端时间，后续由计时叠加层覆盖。
+            startedAt: isActive ? null : (hasTime ? created : null),
+            endedAt: isActive ? null : (hasTime ? updated : null),
             outputPreview: '',
             promptPreview: '',
             parentMessageId: '',
@@ -229,8 +299,71 @@ async function fetchChildSessions(directory, parentSessionId) {
     return all;
 }
 
+/** 拉取当前活跃会话 ID 集合（GET /api/session/active）。
+ *  v2 返回 {data:{sid:{type:'running'}}}，只列出活跃会话；这里复用 normalizeStatuses
+ *  转成 v1 契约后，再筛出 running/busy/retry 的会话 ID。
+ *  请求失败返回 null：调用方不得据此改写任何状态，只保持历史 outcome 映射。 */
+async function fetchActiveSessionIds() {
+    try {
+        const statuses = normalizeStatuses(await api.OpenCodeCall('GET', '/api/session/active'));
+        return normalizeActiveSessionIds(statuses);
+    } catch (_) {
+        return null;
+    }
+}
+
+/** 为面板摘要叠加「本轮运行」计时（就地修改 summaries，不影响纯函数映射）。
+ *  - 运行中：首次观察到 active 时记录起点，之后每次刷新沿用同一起点（不随刷新重置）；
+ *  - 退出 active：删除起点，把「起点 -> 退出观察时刻」保存为本轮时长；
+ *  - active 快照请求失败（null/未提供 Set）：不能把已有 subtaskRunStartedAt
+ *    当成已结束，保持 running 与本轮起点；只有明确快照（Set，含空 Set）才判定退出。
+ *  这样复用已完成子会话再次运行时，不会把 created→updated 的整个历史生命周期当成本次时长。 */
+export function applySubtaskRunTiming(summaries, activeIds) {
+    const now = Date.now();
+    const list = Array.isArray(summaries) ? summaries : [];
+    for (const s of list) {
+        const id = s && s.childSessionId;
+        if (!id) continue;
+        // activeIds 必须是 Set 才代表「已成功取得的明确快照」（空 Set 也有效）。
+        // null/undefined 表示状态查询失败或未提供：此时不能凭 status/outcome 判退出，
+        // 已在 subtaskRunStartedAt 中的 child 继续视为运行中。
+        const hasActiveSnapshot = activeIds instanceof Set;
+        const isRunning = s.status === 'running'
+            || (hasActiveSnapshot ? activeIds.has(id) : subtaskRunStartedAt.has(id));
+        if (isRunning) {
+            // 新一轮运行（包括复用已完成子会话）：清掉上一轮保存的记录，重新计时。
+            subtaskFinishedRun.delete(id);
+            if (!subtaskRunStartedAt.has(id)) subtaskRunStartedAt.set(id, now);
+            const startedAt = subtaskRunStartedAt.get(id);
+            s.status = 'running';
+            s.startedAt = startedAt;
+            s.endedAt = null;
+            s.durationMs = Math.max(0, now - startedAt);
+            continue;
+        }
+        if (subtaskRunStartedAt.has(id)) {
+            // 本轮刚退出 active：以退出观察时刻作为本次结束时间，保存本轮时长。
+            const startedAt = subtaskRunStartedAt.get(id);
+            const record = { startedAt: startedAt, endedAt: now, durationMs: Math.max(0, now - startedAt) };
+            subtaskRunStartedAt.delete(id);
+            subtaskFinishedRun.set(id, record);
+            s.startedAt = record.startedAt;
+            s.endedAt = record.endedAt;
+            s.durationMs = record.durationMs;
+        } else if (subtaskFinishedRun.has(id)) {
+            // 已完成项继续显示本轮观察到的起止时间/时长（不重新用 created→updated 覆盖）。
+            const record = subtaskFinishedRun.get(id);
+            s.startedAt = record.startedAt;
+            s.endedAt = record.endedAt;
+            s.durationMs = record.durationMs;
+        }
+    }
+}
+
 /** 刷新子任务面板：拉取并渲染当前会话的 child sessions 列表。
  *  调用方：会话打开/切换/刷新（session.js、tabs.js）与节流调度（scheduleSubtaskExtraction）。
+ *  同时拉取 /api/session/active：active 中的 child 覆盖历史 outcome（修复复用已完成
+ *  子会话再次运行时仍显示「已完成」的问题）。
  *  失败静默：请求异常时保留面板现状（仅 console 记录），不弹 toast。 */
 export async function refreshSubtaskPanel() {
     const sessionId = store.currentSessionId;
@@ -244,10 +377,26 @@ export async function refreshSubtaskPanel() {
     try {
         const dir = await resolveSubtaskDirectory(sessionId);
         if (!dir) return; // 无目录不请求（避免服务端回落到 CWD=home）
-        const children = await fetchChildSessions(dir, sessionId);
+        // child sessions 与 active 快照并行拉取：两者都返回后才统一叠加状态，避免中间态。
+        const [children, activeIds] = await Promise.all([
+            fetchChildSessions(dir, sessionId),
+            fetchActiveSessionIds(),
+        ]);
         // 竞态保护：结果返回时刷新目标已变化（切了会话 / 又发起了新一轮刷新）→ 丢弃本次结果
         if (seq !== subtaskPanelRefreshSeq || sessionId !== store.currentSessionId) return;
-        store.subtaskSummaries = mapChildSessionsToSummaries(children);
+        // 记录 child -> parent 关系：子会话活动事件据此刷新当前父面板（无需额外查询）。
+        children.forEach(function(child) {
+            if (child && child.id) subtaskParentByChild.set(child.id, sessionId);
+        });
+        // active 查询失败（null）≠ 当前没有活跃会话：不能用历史 outcome 覆盖
+        // 本客户端已观察到的运行态。把已知运行中的 child 作为状态覆盖集合传给
+        // 纯函数；applySubtaskRunTiming 仍接收原始 activeIds，保持「失败不结束计时」语义。
+        const statusActiveIds = activeIds === null
+            ? new Set(subtaskRunStartedAt.keys())
+            : activeIds;
+        const summaries = mapChildSessionsToSummaries(children, statusActiveIds);
+        applySubtaskRunTiming(summaries, activeIds);
+        store.subtaskSummaries = summaries;
         renderSubtaskPanel();
     } catch (err) {
         console.warn('刷新子任务面板失败（保留面板现状）:', err);
@@ -294,6 +443,54 @@ export function scheduleSubtaskExtraction(sessionID) {
         store.subtaskExtractionFrame = 0;
         store.subtaskExtractionPending = false;
         queueSubtaskPanelRefresh();
+    });
+}
+
+/** 子会话活动触发的父面板刷新入口（events.js 在 isBusyActivityEvent / execution.* 时调用）。
+ *  子任务的 SSE 事件带的是 child sessionID，不是当前父会话 ID；旧逻辑在这里直接丢弃，
+ *  导致复用已完成子会话再次运行时父面板一直停留在「已完成」。
+ *  解析顺序（尽量零请求）：
+ *   1) 自身就是当前会话 → 直接走既有节流刷新；
+ *   2) 已知 child -> parent 关系（列表刷新时缓存）→ 父会话是当前会话才刷新；
+ *   3) 当前摘要列表里能找到该 child → 直接认定父会话为当前会话并补缓存；
+ *   4) 关系未知 → 经 permission.js 的 resolveOpenOwner 回溯 parentID；该模块自带
+ *      descendantCache（按 openTabs 签名），每个子会话最多一次网络查询，后续事件命中缓存。
+ *  真正的面板请求仍然统一走 scheduleSubtaskExtraction 的 RAF + 900ms 节流，
+ *  不会因为每个 tool delta 而发请求。 */
+export function scheduleSubtaskActivityRefresh(sessionID) {
+    if (!sessionID) return;
+    if (sessionID === store.currentSessionId) {
+        scheduleSubtaskExtraction(sessionID);
+        return;
+    }
+    const knownParent = subtaskParentByChild.get(sessionID);
+    if (knownParent) {
+        if (knownParent === store.currentSessionId) scheduleSubtaskExtraction(knownParent);
+        return;
+    }
+    // 列表刷新可能尚未写入关系缓存：先查当前摘要（同步、零请求）。
+    const summaries = store.subtaskSummaries || [];
+    for (const s of summaries) {
+        if (s && s.childSessionId === sessionID) {
+            subtaskParentByChild.set(sessionID, store.currentSessionId);
+            scheduleSubtaskExtraction(store.currentSessionId);
+            return;
+        }
+    }
+    // 关系未知：只允许一个查询在途，避免高频 tool delta 触发查询风暴。
+    if (subtaskParentResolving.has(sessionID)) return;
+    subtaskParentResolving.add(sessionID);
+    resolveOpenOwner(sessionID).then(function(owner) {
+        if (owner && owner.ok && owner.ownerSessionID) {
+            subtaskParentByChild.set(sessionID, owner.ownerSessionID);
+            if (owner.ownerSessionID === store.currentSessionId) {
+                scheduleSubtaskExtraction(owner.ownerSessionID);
+            }
+        }
+    }).catch(function() {
+        // 查询失败（会话已删等）不打断事件流；下一次面板刷新会重建已知关系。
+    }).finally(function() {
+        subtaskParentResolving.delete(sessionID);
     });
 }
 
