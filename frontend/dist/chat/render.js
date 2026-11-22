@@ -259,6 +259,39 @@ function hashRenderText(text) {
     return (hash >>> 0).toString(36);
 }
 
+/**
+ * 提取 Code Mode 的 execute 工具内部调用摘要。
+ * 数据来源：part.state.metadata.toolCalls（每项至少包含 tool 字段）。
+ * 规则：只处理 part.tool === 'execute'；toolCalls 必须是非空数组；
+ *       按首次出现顺序去重，重复工具追加「 × 次数」；无有效工具名时返回空串，
+ *       由调用方回退到原有的「工具调用: execute」标题。
+ * 注意：标题只使用内部工具名，绝不读取 input.code，避免把完整代码写进标题。
+ * @param {object} part 工具 part
+ * @returns {string} 形如「shell、memory.memory_search × 2」的摘要；不适用时为空串
+ */
+function buildExecuteToolCallsTitle(part) {
+    if (!part || part.tool !== 'execute') return '';
+    const metadata = part.state && part.state.metadata;
+    const calls = metadata && metadata.toolCalls;
+    if (!Array.isArray(calls) || !calls.length) return '';
+    const names = [];
+    const counts = new Map();
+    for (let i = 0; i < calls.length; i++) {
+        const call = calls[i];
+        // 只接受非空字符串工具名；对象/空值等无效项直接跳过，不产生占位标题
+        const name = call && typeof call.tool === 'string' ? call.tool.trim() : '';
+        if (!name) continue;
+        if (counts.has(name)) {
+            counts.set(name, counts.get(name) + 1);
+        } else {
+            counts.set(name, 1);
+            names.push(name);
+        }
+    }
+    if (!names.length) return '';
+    return names.map((name) => counts.get(name) > 1 ? name + ' × ' + counts.get(name) : name).join('、');
+}
+
 /** 消息渲染签名：id、角色、parts 的 id/type/文本长度与哈希、工具状态。
  *  不包含运行时长/展开状态等会频繁变化的字段，避免正常追加被误判为内容变化。
  *  增量追加前用它校验旧 DOM 是否与缓存中的消息一致。 */
@@ -272,6 +305,13 @@ function messageRenderSignature(item) {
         sig += '|' + String(part.id || '') + ':' + String(part.type || '') + ':' + text.length + ':' + hashRenderText(text);
         if (part.state) {
             sig += ':' + String(part.state.status || '') + ':' + (typeof part.state.output === 'string' ? part.state.output.length : 0);
+            // Code Mode 的 execute 标题由 metadata.toolCalls 决定：metadata 后到时
+            // 摘要会变化，必须纳入签名，否则增量/流式渲染不会重建标题。
+            // 只对 execute 生效，其他工具（包括带 toolCalls 的非 execute）签名行为不变。
+            if (part.tool === 'execute' && Array.isArray(part.state.metadata && part.state.metadata.toolCalls)) {
+                const calls = part.state.metadata.toolCalls;
+                sig += '|exec:' + calls.length + ':' + hashRenderText(buildExecuteToolCallsTitle(part));
+            }
         }
     }
     if (info.error) {
@@ -1528,6 +1568,11 @@ export function renderTool(part) {
 
     const isShell = tool === 'bash' || tool === 'shell';
 
+    // Code Mode execute：metadata.toolCalls 提供内部工具清单时增强标题。
+    // 仅 execute 且存在有效内部工具名时非空；其他工具（包括同样带 metadata.toolCalls
+    // 的非 execute）保持原显示，不进入该分支。
+    const executeCallsTitle = buildExecuteToolCallsTitle(part);
+
     // 细粒度文件操作分类（icon 为 sprite 中的 symbol id，渲染时统一拼成内联 SVG）
     const fileCategoryMap = {
         read:              { cat: 'file-read',     icon: 'i-book-open', label: '读取文件' },
@@ -1552,7 +1597,8 @@ export function renderTool(part) {
     const iconMap = { shell: 'i-terminal', tool: 'i-wrench' };
     const labelMap = { shell: '指令执行', tool: '工具调用' };
     const iconId = fc ? fc.icon : (iconMap[category] || 'i-wrench');
-    const label = fc ? fc.label : (labelMap[category] || '工具调用');
+    // execute 有内部工具摘要时标题前缀改为「代码模式」，否则沿用原有分类文案
+    const label = executeCallsTitle ? '代码模式' : (fc ? fc.label : (labelMap[category] || '工具调用'));
 
     let statusText = '';
     let statusClass = '';
@@ -1568,7 +1614,9 @@ export function renderTool(part) {
     const filePath = fileInput
         ? (fileInput.filePath || fileInput.file_path || fileInput.path || fileInput.filename || '')
         : '';
-    const title = filePath || state.title || tool;
+    // execute 的内部工具摘要优先作为标题；否则沿用原有 filePath/state.title/工具名取值，
+    // 从而在没有有效 toolCalls 时仍显示「工具调用: execute」。
+    const title = executeCallsTitle || filePath || state.title || tool;
     head.innerHTML = `${iconSvg(iconId)} ${label}: <strong title="${escapeHtml(title)}">${escapeHtml(title)}</strong> <span class="oc-tool-status ${statusClass}">${statusText}</span>` + buildDurationHtml(part, true);
 
     const body = document.createElement('div');
