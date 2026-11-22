@@ -269,16 +269,28 @@ function hashRenderText(text) {
  * @param {object} part 工具 part
  * @returns {string} 形如「shell、memory.memory_search × 2」的摘要；不适用时为空串
  */
-function buildExecuteToolCallsTitle(part) {
-    if (!part || part.tool !== 'execute') return '';
-    const metadata = part.state && part.state.metadata;
-    const calls = metadata && metadata.toolCalls;
-    if (!Array.isArray(calls) || !calls.length) return '';
+/** Code Mode execute 的证据：官方 execute 输入是 { code: string }。
+ *  只有同时具备 input.code 才按代码模式处理，避免未来同名普通工具被误判。 */
+function isCodeModeExecute(part) {
+    return !!part && part.tool === 'execute'
+        && typeof (part.state && part.state.input && part.state.input.code) === 'string';
+}
+
+/** Code Mode 标题。字段语义来自官方 code-mode 的 Metadata：
+ *  - toolCalls: { tool, status: 'running' | 'completed' | 'error', input? }[]
+ *  - error?: boolean（整体执行失败）
+ *  tool 通用包装还可能补充 truncated / outputPath，与标题无关。
+ *  只使用这些结构化字段；不读取 input.code，也不根据 output 文本猜测状态。 */
+function buildExecuteTitle(part) {
+    if (!isCodeModeExecute(part)) return '';
+    const state = part.state || {};
+    const metadata = state.metadata || {};
+    const calls = Array.isArray(metadata.toolCalls) ? metadata.toolCalls : [];
     const names = [];
     const counts = new Map();
     for (let i = 0; i < calls.length; i++) {
         const call = calls[i];
-        // 只接受非空字符串工具名；对象/空值等无效项直接跳过，不产生占位标题
+        // tool 是官方 CallEntry 的工具名；无效项直接跳过
         const name = call && typeof call.tool === 'string' ? call.tool.trim() : '';
         if (!name) continue;
         if (counts.has(name)) {
@@ -288,8 +300,19 @@ function buildExecuteToolCallsTitle(part) {
             names.push(name);
         }
     }
-    if (!names.length) return '';
-    return names.map((name) => counts.get(name) > 1 ? name + ' × ' + counts.get(name) : name).join('、');
+    const summary = names.length
+        ? names.map((name) => counts.get(name) > 1 ? name + ' × ' + counts.get(name) : name).join('、')
+        : '';
+    // metadata.error 是 Code Mode 官方整体失败标记；status=error 同样表示失败。
+    if (metadata.error === true || state.status === 'error') {
+        return summary ? summary + '（执行失败）' : '执行失败';
+    }
+    if (summary) return summary;
+    if (state.status === 'running') return '准备中';
+    // 官方 Code Mode 核心是同步返回 Success/Failure，没有后台状态字段；
+    // 外层 execute 完成且无失败标记、无工具记录时，用「已提交」描述更准确。
+    if (state.status === 'completed') return '已提交';
+    return '';
 }
 
 /** 消息渲染签名：id、角色、parts 的 id/type/文本长度与哈希、工具状态。
@@ -308,9 +331,12 @@ function messageRenderSignature(item) {
             // Code Mode 的 execute 标题由 metadata.toolCalls 决定：metadata 后到时
             // 摘要会变化，必须纳入签名，否则增量/流式渲染不会重建标题。
             // 只对 execute 生效，其他工具（包括带 toolCalls 的非 execute）签名行为不变。
-            if (part.tool === 'execute' && Array.isArray(part.state.metadata && part.state.metadata.toolCalls)) {
-                const calls = part.state.metadata.toolCalls;
-                sig += '|exec:' + calls.length + ':' + hashRenderText(buildExecuteToolCallsTitle(part));
+            if (part.tool === 'execute'
+                && typeof (part.state.input && part.state.input.code) === 'string') {
+                const calls = part.state.metadata && part.state.metadata.toolCalls;
+                const callCount = Array.isArray(calls) ? calls.length : 0;
+                const execTitle = buildExecuteTitle(part);
+                sig += '|exec:' + callCount + ':' + hashRenderText(execTitle);
             }
         }
     }
@@ -1571,7 +1597,13 @@ export function renderTool(part) {
     // Code Mode execute：metadata.toolCalls 提供内部工具清单时增强标题。
     // 仅 execute 且存在有效内部工具名时非空；其他工具（包括同样带 metadata.toolCalls
     // 的非 execute）保持原显示，不进入该分支。
-    const executeCallsTitle = buildExecuteToolCallsTitle(part);
+    // Code Mode execute 的标题由 metadata.toolCalls 与 metadata.error 决定；
+    // 其他工具（包括同名非 Code Mode 工具）保持原显示。
+    const executeTitle = buildExecuteTitle(part);
+    // Code Mode 整体失败标记：外层 execute 可能仍是 completed，徽标需要跟随 metadata.error。
+    const codeModeFailed = isCodeModeExecute(part)
+        && !!part.state.metadata
+        && part.state.metadata.error === true;
 
     // 细粒度文件操作分类（icon 为 sprite 中的 symbol id，渲染时统一拼成内联 SVG）
     const fileCategoryMap = {
@@ -1589,7 +1621,11 @@ export function renderTool(part) {
     const category = isShell ? 'shell' : (fc ? fc.cat : 'tool');
 
     const el = document.createElement('div');
-    el.className = `oc-part oc-tool oc-tool-${category}` + (isCompleted ? ' done' : '') + (isError ? ' error' : '') + (isRunning ? ' running' : '') + (isInterrupted ? ' interrupt' : '');
+    el.className = `oc-part oc-tool oc-tool-${category}`
+        + (isCompleted && !codeModeFailed ? ' done' : '')
+        + (isError || (codeModeFailed && !isRunning) ? ' error' : '')
+        + (isRunning ? ' running' : '')
+        + (isInterrupted ? ' interrupt' : '');
 
     const head = document.createElement('div');
     head.className = 'oc-tool-head';
@@ -1598,7 +1634,7 @@ export function renderTool(part) {
     const labelMap = { shell: '指令执行', tool: '工具调用' };
     const iconId = fc ? fc.icon : (iconMap[category] || 'i-wrench');
     // execute 有内部工具摘要时标题前缀改为「代码模式」，否则沿用原有分类文案
-    const label = executeCallsTitle ? '代码模式' : (fc ? fc.label : (labelMap[category] || '工具调用'));
+    const label = executeTitle ? '代码模式' : (fc ? fc.label : (labelMap[category] || '工具调用'));
 
     let statusText = '';
     let statusClass = '';
@@ -1607,6 +1643,8 @@ export function renderTool(part) {
     else if (isInterrupted) { statusText = '中断'; statusClass = 'interrupt'; }
     else if (isRunning) { statusText = '运行中'; statusClass = 'running'; }
     else { statusText = status || '等待'; statusClass = 'pending'; }
+    // Code Mode 程序整体失败时，标题已标注执行失败，徽标也必须一致，不能继续显示「完成」。
+    if (codeModeFailed && !isRunning) { statusText = '失败'; statusClass = 'err'; }
 
     // 文件类工具的输入里带绝对路径（input 可能是对象或 JSON 字符串），
     // 标题优先用它，避免只显示工具名；其他工具仍用 state.title。
@@ -1616,7 +1654,7 @@ export function renderTool(part) {
         : '';
     // execute 的内部工具摘要优先作为标题；否则沿用原有 filePath/state.title/工具名取值，
     // 从而在没有有效 toolCalls 时仍显示「工具调用: execute」。
-    const title = executeCallsTitle || filePath || state.title || tool;
+    const title = executeTitle || filePath || state.title || tool;
     head.innerHTML = `${iconSvg(iconId)} ${label}: <strong title="${escapeHtml(title)}">${escapeHtml(title)}</strong> <span class="oc-tool-status ${statusClass}">${statusText}</span>` + buildDurationHtml(part, true);
 
     const body = document.createElement('div');
