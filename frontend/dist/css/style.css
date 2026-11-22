@@ -2106,10 +2106,24 @@ button.oc-head-icon-btn svg {
     padding: 1px 5px;
     background: var(--bg-input);
     border-radius: var(--radius-xs);
+    /* 来源标签固定四字，仍留上限兜底，避免异常内容把描述挤出面板。 */
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .oc-cmd-source.fixed {
     color: var(--accent);
     background: var(--accent-ghost);
+}
+/* 技能来源标签：用户自己的 skill 用强调底色，便于在几十条的长列表里一眼定位；
+   插件自带的调暗一档，不抢视觉。官方内置的沿用默认灰色。 */
+.oc-cmd-source.skill-user {
+    color: var(--accent);
+    background: var(--accent-ghost);
+}
+.oc-cmd-source.skill-plugin {
+    color: var(--text-secondary);
 }
 .oc-cmd-empty {
     color: var(--text-muted);

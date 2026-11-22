@@ -30,6 +30,24 @@ const FIXED_COMMANDS = [
     { name: 'btw',        description: '侧问：一次性回答，不写入会话', source: 'fixed' },
 ];
 
+
+/**
+ * 按 skill 的 path 判定来源，供命令面板打来源标签。GET /api/skill 不返回
+ * 显式的来源字段，但 path 的形态足以区分三类：
+ *  - 以 skill:// 开头：随 opencode 二进制分发的官方 skill（如 opencode、report、Browser）
+ *  - 路径含 node_modules：插件自带的 skill（不显示具体包名，只标「插件技能」）
+ *  - 其余：用户自己放在 skills 目录下的 skill
+ * @param {string} path skill 的 SKILL.md 路径
+ * @returns {string} 展示用的来源标签
+ */
+function describeSkillSource(path) {
+    const p = String(path || '');
+    // 用「官方」而不是「内置」：固定命令的标签已经叫「内置」，避免两者混淆。
+    if (p.indexOf('skill://') === 0) return '官方技能';
+    if (p.indexOf('node_modules') >= 0) return '插件技能';
+    return '用户技能';
+}
+
 /** 判断是否为面板内置命令（由前端本地执行，服务端并不认识这些名字）。 */
 export function isFixedCommand(name) {
     return FIXED_COMMANDS.some(item => item.name === name);
@@ -67,7 +85,11 @@ export async function loadCmdPalette() {
             .map(s => ({
                 name: (s && s.id) || '',
                 description: (s && (s.description || s.name)) || '技能',
+                // source 固定为 skill：selectCmdItem / isKnownSkill 靠它区分技能与命令，
+                // 不能换成来源标签，否则插入逻辑会走错分支。
                 source: 'skill',
+                // skillSource 只用于展示：官方技能 / 插件技能 / 用户技能
+                skillSource: describeSkillSource(s && s.path),
             }))
             .filter(it => it.name);
     } catch (_) {
@@ -145,7 +167,17 @@ export function renderCmdPalette(query) {
     let html = '';
     filtered.forEach((item, i) => {
         const active = i === cmdPaletteIndex ? ' active' : '';
-        const sourceTag = item.source === 'fixed' ? '<span class="oc-cmd-source fixed">内置</span>' : `<span class="oc-cmd-source">${escapeHtml(item.source || '')}</span>`;
+        // 来源标签：固定命令「内置」/ 技能细分为「官方技能·插件技能·用户技能」/ 服务端命令原样显示
+        let sourceTag;
+        if (item.source === 'fixed') {
+            sourceTag = '<span class="oc-cmd-source fixed">内置</span>';
+        } else if (item.source === 'skill') {
+            const label = item.skillSource || '技能';
+            const kind = label === '官方技能' ? 'official' : label === '插件技能' ? 'plugin' : 'user';
+            sourceTag = `<span class="oc-cmd-source skill-${kind}">${escapeHtml(label)}</span>`;
+        } else {
+            sourceTag = `<span class="oc-cmd-source">${escapeHtml(item.source || '')}</span>`;
+        }
         html += `<div class="oc-cmd-item${active}" data-cmd="${escapeHtml(item.name)}" data-source="${escapeHtml(item.source || '')}" data-idx="${i}">
             <span class="oc-cmd-name">/${escapeHtml(item.name)}</span>
             <span class="oc-cmd-desc">${escapeHtml(item.description || '')}</span>
