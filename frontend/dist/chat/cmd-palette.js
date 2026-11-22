@@ -23,10 +23,11 @@ let cmdPaletteIndex = -1;
 let cmdPaletteVisible = false;
 
 const FIXED_COMMANDS = [
-    { name: 'summarize',  description: '压缩会话上下文', source: 'fixed' },
+    { name: 'compact',  description: '压缩会话上下文', source: 'fixed' },
+    { name: 'reload',     description: '从配置中重新加载智能体、命令、技能、MCP 服务器和插件', source: 'fixed' },
     { name: 'background', description: '把前台阻塞的工具转到后台观察', source: 'fixed' },
-    { name: 'revert',     description: '撤销最后消息（需 Git 仓库）', source: 'fixed' },
-    { name: 'unrevert',   description: '取消撤销（清除暂存的撤销；需 Git 仓库）', source: 'fixed' },
+    { name: 'undo',       description: '撤销最后消息（需 Git 仓库）', source: 'fixed' },
+    { name: 'redo',       description: '重做已撤销的消息（需 Git 仓库）', source: 'fixed' },
     { name: 'fork',       description: '从消息创建新会话（分叉）', source: 'fixed' },
     { name: 'btw',        description: '侧问：一次性回答，不写入会话', source: 'fixed' },
 ];
@@ -267,8 +268,12 @@ export function selectCmdItem(cmdName, source) {
 }
 
 export async function executeFixedCmd(cmdName, args) {
-    if (!store.webRunning || !store.currentSessionId) {
-        showToast('请先启动服务并选择会话', 'error');
+    if (!store.webRunning) {
+        showToast('请先启动服务', 'error');
+        return;
+    }
+    if (cmdName !== 'reload' && !store.currentSessionId) {
+        showToast('请先选择会话', 'error');
         return;
     }
     const sid = store.currentSessionId;
@@ -280,11 +285,21 @@ export async function executeFixedCmd(cmdName, args) {
 
     try {
         switch (cmdName) {
-            case 'summarize': {
-                // v1: POST /session/{id}/summarize {providerID, modelID}
-                // v2: POST /api/session/{id}/compact {}（不再接受 model 参数，沿用会话当前模型）
+            case 'compact': {
                 await api.OpenCodeCall('POST', `/api/session/${encodeURIComponent(sid)}/compact`, {});
                 showToast('会话上下文已压缩', 'success');
+                break;
+            }
+            case 'reload': {
+                // v2: POST /api/location/reload
+                // 重建所有已加载 location，重新读取配置中的智能体、命令、技能、MCP 与插件。
+                await api.OpenCodeCall('POST', '/api/location/reload');
+                // 命令/技能列表缓存失效，下次打开面板重新拉取
+                cmdPaletteLoaded = false;
+                cmdPaletteDir = '';
+                if (store.currentSessionId) loadMessages();
+                buildTree();
+                showToast('已从配置重新加载', 'success');
                 break;
             }
             case 'background': {
@@ -295,32 +310,34 @@ export async function executeFixedCmd(cmdName, args) {
                 showToast('已将前台任务转到后台', 'success');
                 break;
             }
-            case 'revert': {
-                // 撤销最后一条 assistant 消息
+            case 'undo': {
+                // 与 OpenCode Web UI 一致：interrupt → wait → revert/stage；不调用 commit。
+                const detail = unwrap(await api.OpenCodeCall('GET', `/api/session/${encodeURIComponent(sid)}`));
+                const boundary = detail && detail.revert && detail.revert.messageID;
                 const list = getCachedMessages(sid);
-                let messageID = '';
+                let prior = null;
                 for (let i = list.length - 1; i >= 0; i--) {
                     const info = list[i].info || list[i];
-                    if (info.role === 'assistant') {
-                        messageID = info.id || '';
-                        break;
-                    }
+                    if (!boundary || String(info.id) < String(boundary)) { prior = info; break; }
                 }
-                if (!messageID) { showToast('未找到可撤销的消息', 'error'); return; }
-                // v2 是三段式：stage（暂存标记）→ commit（真正落实回退）。
-                // 只调 stage 不会回退（此前就是漏了 commit 导致"撤销不生效"）。
-                await api.OpenCodeCall('POST', `/api/session/${encodeURIComponent(sid)}/revert/stage`, { messageID });
-                await api.OpenCodeCall('POST', `/api/session/${encodeURIComponent(sid)}/revert/commit`);
-                showToast('已撤销到最后一条助手消息', 'success');
+                await api.OpenCodeCall('POST', `/api/session/${encodeURIComponent(sid)}/interrupt`);
+                await api.OpenCodeCall('POST', `/api/experimental/session/${encodeURIComponent(sid)}/wait`, {});
+                if (prior) {
+                    await api.OpenCodeCall('POST', `/api/session/${encodeURIComponent(sid)}/revert/stage`, { messageID: prior.id });
+                } else {
+                    await api.OpenCodeCall('DELETE', `/api/session/${encodeURIComponent(sid)}/revert`);
+                }
+                showToast('已撤销', 'success');
                 loadMessages();
                 break;
             }
-            case 'unrevert':
-                // v2 没有"重做已提交撤销"的端点：DELETE /revert 的语义是「清除暂存的撤销 = 取消撤销」。
+            case 'redo': {
+                // 与官方一致：redo 是清除撤销边界
                 await api.OpenCodeCall('DELETE', `/api/session/${encodeURIComponent(sid)}/revert`);
-                showToast('已取消撤销', 'success');
+                showToast('已重做', 'success');
                 loadMessages();
                 break;
+            }
             case 'fork':
                 // 弹出消息选择（选一条用户消息作为分叉点），成功后新建 tab + 刷新树
                 await showForkMessagePicker(sid);
