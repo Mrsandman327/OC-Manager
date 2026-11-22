@@ -225,8 +225,6 @@ const mockApi = (() => {
             if (path === '/command') return { success: true, status: 200, body: JSON.stringify([
                 { name: 'new', description: '开始新会话', source: 'builtin' },
                 { name: 'compact', description: '压缩会话上下文', source: 'builtin' },
-                { name: 'undo', description: '撤销最后消息(需Git仓库)', source: 'builtin' },
-                { name: 'redo', description: '重做撤销(需Git仓库)', source: 'builtin' },
                 { name: 'exit', description: '退出OpenCode', source: 'builtin' },
                 { name: 'help', description: '显示帮助/命令面板', source: 'builtin' },
                 { name: 'models', description: '列出可用模型', source: 'builtin' },

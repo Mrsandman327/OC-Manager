@@ -26,8 +26,6 @@ const FIXED_COMMANDS = [
     { name: 'compact',  description: '压缩会话上下文', source: 'fixed' },
     { name: 'reload',     description: '从配置中重新加载智能体、命令、技能、MCP 服务器和插件', source: 'fixed' },
     { name: 'background', description: '把前台阻塞的工具转到后台观察', source: 'fixed' },
-    { name: 'undo',       description: '撤销最后消息（需 Git 仓库）', source: 'fixed' },
-    { name: 'redo',       description: '重做已撤销的消息（需 Git 仓库）', source: 'fixed' },
     { name: 'fork',       description: '从消息创建新会话（分叉）', source: 'fixed' },
     { name: 'btw',        description: '侧问：一次性回答，不写入会话', source: 'fixed' },
 ];
@@ -308,34 +306,6 @@ export async function executeFixedCmd(cmdName, args) {
                 // 服务端标记 isBackgrounded 并登记完成通知，不会取消任务；会话空闲时是 no-op（204）。
                 await api.OpenCodeCall('POST', `/api/session/${encodeURIComponent(sid)}/background`);
                 showToast('已将前台任务转到后台', 'success');
-                break;
-            }
-            case 'undo': {
-                // 与 OpenCode Web UI 一致：interrupt → wait → revert/stage；不调用 commit。
-                const detail = unwrap(await api.OpenCodeCall('GET', `/api/session/${encodeURIComponent(sid)}`));
-                const boundary = detail && detail.revert && detail.revert.messageID;
-                const list = getCachedMessages(sid);
-                let prior = null;
-                for (let i = list.length - 1; i >= 0; i--) {
-                    const info = list[i].info || list[i];
-                    if (!boundary || String(info.id) < String(boundary)) { prior = info; break; }
-                }
-                await api.OpenCodeCall('POST', `/api/session/${encodeURIComponent(sid)}/interrupt`);
-                await api.OpenCodeCall('POST', `/api/experimental/session/${encodeURIComponent(sid)}/wait`, {});
-                if (prior) {
-                    await api.OpenCodeCall('POST', `/api/session/${encodeURIComponent(sid)}/revert/stage`, { messageID: prior.id });
-                } else {
-                    await api.OpenCodeCall('DELETE', `/api/session/${encodeURIComponent(sid)}/revert`);
-                }
-                showToast('已撤销', 'success');
-                loadMessages();
-                break;
-            }
-            case 'redo': {
-                // 与官方一致：redo 是清除撤销边界
-                await api.OpenCodeCall('DELETE', `/api/session/${encodeURIComponent(sid)}/revert`);
-                showToast('已重做', 'success');
-                loadMessages();
                 break;
             }
             case 'fork':
