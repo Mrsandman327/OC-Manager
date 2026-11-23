@@ -1045,6 +1045,8 @@ export function openFileBrowserModal(rootDir, options) {
         modal.classList.add('file-browser-compact');
     }
     modal.style.display = 'flex';
+    // 每次打开都是新会话：文件列表区域恢复展开（收起状态不记忆）
+    setFileBrowserFilesCollapsed(false);
     renderFileBrowserMode();
     // 终端入口随根目录更新；每次打开都是新会话，之前残留的终端已在关闭时清掉
     syncTerminalEntry(rootDir || '');
@@ -1639,10 +1641,34 @@ export async function gitCommit() {
     renderFileBrowserGitSection();
 }
 
+/** 设置文件列表区域（左侧整块）的收起状态。
+ *  收起时隐藏左侧面板与拖拽分隔条，预览区自动铺满剩余宽度；
+ *  --file-browser-left-width 不改，展开后恢复用户上次拖出的宽度。 */
+export function setFileBrowserFilesCollapsed(collapsed) {
+    var body = document.querySelector('#fileBrowserModal .file-browser-body');
+    if (!body) return;
+    body.classList.toggle('fb-list-collapsed', !!collapsed);
+}
+
+/** 收起 / 展开文件列表区域。仅在点击「当前已激活的模式按钮」时调用。 */
+export function toggleFileBrowserFilesPanel() {
+    var body = document.querySelector('#fileBrowserModal .file-browser-body');
+    if (!body) return;
+    body.classList.toggle('fb-list-collapsed');
+}
+
 export function switchFileBrowserMode(mode) {
     var state = store.fileBrowserState;
     if (mode === 'git' && (!state.features || state.features.indexOf('git') < 0)) return;
-    state.mode = (mode === 'git' || mode === 'search') ? mode : 'files';
+    var target = (mode === 'git' || mode === 'search') ? mode : 'files';
+    // 点击的就是当前模式：不再重复切页，改为收起 / 展开文件列表区域
+    if (target === state.mode) {
+        toggleFileBrowserFilesPanel();
+        return;
+    }
+    // 收起状态不记忆：任何一次真正的模式切换都先恢复展开
+    setFileBrowserFilesCollapsed(false);
+    state.mode = target;
     renderFileBrowserMode();
     if (state.mode === 'git' && !state.git.historyItems.length && !state.git.historyLoading) {
         loadFileBrowserGitHistory(false);

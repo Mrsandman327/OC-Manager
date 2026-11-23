@@ -169,6 +169,15 @@
        白色会让内部白色面板失去层次，这里恢复原底色 */
     background: var(--bg-secondary);
 }
+/* 文件列表区域收起：隐藏左侧整块面板与拖拽分隔条，右侧预览区自动铺满剩余宽度。
+   模式按钮栏（52px）保持不变；--file-browser-left-width 不修改，展开后恢复用户上次的宽度。 */
+.file-browser-modal .file-browser-body.fb-list-collapsed {
+    grid-template-columns: 52px minmax(0, 1fr);
+}
+.file-browser-modal .file-browser-body.fb-list-collapsed .file-browser-list-panel,
+.file-browser-modal .file-browser-body.fb-list-collapsed .file-browser-resize-handle {
+    display: none;
+}
 .file-browser-mode-bar {
     display: flex;
     flex-direction: column;
