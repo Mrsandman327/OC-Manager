@@ -112,6 +112,30 @@ SHEET.replaceSync(`
     white-space: nowrap;
 }
 
+/* ---------- 状态圆点（后台 Tab 运行/完成/失败/中断） ---------- */
+/* 右上角 6px 小圆点；仅宿主带 run-status 时显示。hover 时关闭按钮出现，圆点淡出让位。 */
+.dot {
+    position: absolute;
+    top: 3px;
+    right: 3px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    display: none;
+    pointer-events: none;
+    z-index: 0;
+    opacity: 1;
+    transition: opacity .12s ease;
+}
+:host([run-status]) .dot { display: block; }
+:host([run-status="running"]) .dot { background: var(--accent); }
+:host([run-status="succeeded"]) .dot { background: var(--success); }
+/* completed 为历史别名，保留兼容 */
+:host([run-status="completed"]) .dot { background: var(--success); }
+:host([run-status="failed"]) .dot { background: var(--danger); }
+:host([run-status="interrupted"]) .dot { background: var(--warning); }
+.frame:hover .dot { opacity: 0; }
+
 /* ---------- 关闭按钮 ---------- */
 /* 绝对定位：不占布局。悬浮时浮到右侧，标题保持原宽、尾部由遮罩淡出，× 压在渐隐区上 */
 .close {
@@ -130,6 +154,7 @@ SHEET.replaceSync(`
     cursor: pointer;
     opacity: 0;
     pointer-events: none;
+    z-index: 1;
     transition: opacity .12s ease, color .12s ease;
 }
 
@@ -185,6 +210,7 @@ class OcTab extends HTMLElement {
         root.innerHTML =
             '<div class="frame" part="frame" role="tab" tabindex="0">' +
                 '<span class="title" part="title"><slot></slot></span>' +
+                '<span class="dot" part="dot" aria-hidden="true"></span>' +
                 '<button class="close" part="close" type="button" aria-label="关闭">' +
                     '<svg aria-hidden="true" viewBox="0 0 12 12">' +
                         '<path d="M2 2l8 8M10 2l-8 8"/>' +

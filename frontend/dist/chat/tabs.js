@@ -12,7 +12,7 @@
 import { store } from '../core/state.js';
 import { escapeHtml, getTabMessagesEl, ensureTabMessagesEl, getCachedMessages, updateModelInfo, restoreSessionSelection, refreshServiceStatus } from '../core/utils.js';
 import { isMobileTreeMode } from './mobile.js';
-import { updateScrollBottomButton, updateSendButton } from './render.js';
+import { updateScrollBottomButton, updateSendButton, isBusyStatus } from './render.js';
 import { refreshSessionStatusFromActive } from './events.js';
 import { refreshSubtaskPanel } from './sidepanel.js';
 import { refreshSchedulePanel } from './schedules.js';
@@ -32,6 +32,11 @@ export let tabActivationHandler = null;
 export function setTabActivationHandler(fn) {
     tabActivationHandler = fn;
 }
+
+// 后台 Tab 终态提醒变化时重绘 Tab 栏。用事件而不是直接 import，避免循环依赖。
+document.addEventListener('oc-session-run-alert', function() {
+    renderTabsBar();
+});
 
 /** 更新移动端标题（窄屏没有 Tab 列表，标题显示在 Tab 行内） */
 function updateMobileChatTitle() {
@@ -71,8 +76,16 @@ export function renderTabsBar() {
         return;
     }
     bar.innerHTML = store.openTabs.map(function(tab) {
-        var active = tab.sessionID === store.activeTabId ? ' active' : '';
-        return '<oc-tab data-session-id="' + escapeHtml(tab.sessionID) + '"' + active + '>' +
+        var isActive = tab.sessionID === store.activeTabId;
+        var active = isActive ? ' active' : '';
+        // 当前 Tab 不显示状态点；后台 Tab 运行中优先蓝点，否则显示一次性终态点。
+        var runStatus = '';
+        if (!isActive) {
+            if (isBusyStatus(store.sessionStatuses[tab.sessionID])) runStatus = 'running';
+            else runStatus = store.sessionRunAlert[tab.sessionID] || '';
+        }
+        var runAttr = runStatus ? ' run-status="' + escapeHtml(runStatus) + '"' : '';
+        return '<oc-tab data-session-id="' + escapeHtml(tab.sessionID) + '"' + active + runAttr + '>' +
             escapeHtml(tab.title || tab.sessionID) +
         '</oc-tab>';
     }).join('');
@@ -161,6 +174,8 @@ export function switchTab(sessionID) {
     if (!sessionID) return;
     store.activeTabId = sessionID;
     store.currentSessionId = sessionID;
+    // 切到该 Tab 即视为已看到结果：清除一次性终态提醒。
+    delete store.sessionRunAlert[sessionID];
     // 同步重算发送按钮：按钮文案是上一次 updateSendButton() 的快照，
     // 而点击时读的是实时状态。若等异步快照回来再刷新，这段窗口内会拿旧会话的
     // 文案执行新会话的动作（显示「停止」却实际发送，或反之）。
@@ -238,6 +253,7 @@ export function switchTab(sessionID) {
 export function closeSessionTab(sessionID) {
     if (!sessionID) return;
     store.openTabs = store.openTabs.filter(function(t) { return t.sessionID !== sessionID; });
+    delete store.sessionRunAlert[sessionID];
 
     // 销毁容器，释放 DOM
     var el = getTabMessagesEl(sessionID);

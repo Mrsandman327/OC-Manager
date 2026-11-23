@@ -35,6 +35,9 @@ export const store = {
     sessionStatusMeta: {},
     /** 会话错误信息映射表 */
     sessionErrors: {},
+    /** 后台 Tab 的一次性终态提醒：key=会话ID，value='completed'|'failed'|'interrupted'。
+     *  仅当会话在非当前 Tab 结束、且用户尚未切回时存在；切回后清除。 */
+    sessionRunAlert: {},
     /** 新建会话的待用工作目录（tree.js 写入，session.js 首次发送时读取） */
     pendingWorkDir: '',
     /** 会话信息映射表：key=会话ID，value={ title, directory, updatedAt }。

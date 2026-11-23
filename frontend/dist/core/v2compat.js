@@ -982,27 +982,31 @@ export function adaptEvent(event) {
 
         // 一次执行结束：成功对应 v1 的 session.idle，失败对应 v1 的 session.error
         case 'session.execution.succeeded':
-            return [{ type: 'session.idle', sessionID }];
+            return [{ type: 'session.idle', sessionID, finishType: 'succeeded' }];
         // 执行被中断（reason 为服务端枚举 user|shutdown|superseded|inactivity）：
         //  - user：用户主动停止（含本应用调用 interrupt），与既有语义一致，按 idle 处理；
         //  - 其它（或缺失）：属于异常终止，转成错误让用户看到（官方 TUI 同样把非 user 视为失败）。
         case 'session.execution.interrupted': {
             const reason = data.reason || '';
-            if (!reason || reason === 'user') return [{ type: 'session.idle', sessionID }];
+            // 所有 interrupted 都保留终态类型与 reason；是否提醒由后台 Tab 状态决定，
+            // 不在此处区分 user / shutdown，避免另一个客户端停止时丢失提醒。
+            if (!reason || reason === 'user') {
+                return [{ type: 'session.idle', sessionID, finishType: 'interrupted', reason: reason || 'user' }];
+            }
             // 非 user 的异常终止：服务端已经不再执行，先补一条 session.idle 再报错。
             // 用 idle（终止事件）而不是 status：events.js 会强制采纳并清除本地保护窗口，
             // 不会被停止/失败瞬间的本地意图挡住。
             return [
-                { type: 'session.idle', sessionID },
-                { type: 'session.error', sessionID, error: '会话执行被中断（' + reason + '）' },
+                { type: 'session.idle', sessionID, finishType: 'interrupted', reason },
+                { type: 'session.error', sessionID, error: '会话执行被中断（' + reason + '）', errorObject: data.error, finishType: 'interrupted', reason },
             ];
         }
         case 'session.execution.failed':
             // 执行级失败 = 会话已终止：必须同时置回 idle（否则按钮停在「停止」）。
             // step.failed 不在此列——单个 step 失败后可能重试/继续，不能误判空闲。
             return [
-                { type: 'session.idle', sessionID },
-                { type: 'session.error', sessionID, error: errorText(data.error) },
+                { type: 'session.idle', sessionID, finishType: 'failed' },
+                { type: 'session.error', sessionID, error: errorText(data.error), errorObject: data.error, finishType: 'failed' },
             ];
 
         // 单个 step 失败（如模型调用报错）：服务端会把 error / finish / 用量记入 assistant

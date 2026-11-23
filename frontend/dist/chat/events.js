@@ -73,7 +73,12 @@ function dispatchV2Event(v2event) {
     // 终止事件（execution.succeeded/failed/interrupted）不在 isBusyActivityEvent 内，
     // 由 adaptEvent 转成 idle/error 后再清除状态。
     if (v2sid && isBusyActivityEvent(v2type)) {
+        const wasBusy = isBusyStatus(store.sessionStatuses[v2sid]);
         setSessionStatus(v2sid, 'busy', 'activity');
+        // 新一次运行开始：清掉上一轮可能在后台留下的终态点，运行中显示蓝点。
+        if (v2type === 'session.execution.started') clearSessionRunAlert(v2sid);
+        // 从空闲/终态进入运行中时重绘 Tab，后台会话立即出现蓝点；运行中后续活动不重复重绘。
+        if (!wasBusy) notifySessionRunAlert();
     }
     // 子任务活动/终止也要触发父会话的子任务面板刷新：
     // 子会话事件携带的是自己的 sessionID，而面板只展示当前父会话的 child sessions。
@@ -294,6 +299,34 @@ async function handleSessionErrorEvent(eventSid, props) {
     if (eventSid === store.currentSessionId) loadMessages();
 }
 
+/** 通知 Tab 栏重绘（避免 events.js 反向 import tabs.js 造成循环依赖）。 */
+function notifySessionRunAlert() {
+    try {
+        document.dispatchEvent(new CustomEvent('oc-session-run-alert'));
+    } catch (_) {}
+}
+
+/** 后台 Tab 的终态提醒：只有已打开、且不是当前 Tab 的会话才标记。
+ *  当前 Tab 直接清除；切回时由 tabs.js 清除。 */
+function markSessionRunAlert(sessionID, type) {
+    if (!sessionID || !type) return;
+    const isOpen = (store.openTabs || []).some(function(tab) { return tab.sessionID === sessionID; });
+    if (!isOpen) return;
+    if (sessionID === store.activeTabId || sessionID === store.currentSessionId) {
+        delete store.sessionRunAlert[sessionID];
+    } else {
+        store.sessionRunAlert[sessionID] = type;
+    }
+    notifySessionRunAlert();
+}
+
+/** 新一次运行开始时清除旧的终态提醒；没有提醒时不触发重绘。 */
+function clearSessionRunAlert(sessionID) {
+    if (!sessionID || !store.sessionRunAlert[sessionID]) return;
+    delete store.sessionRunAlert[sessionID];
+    notifySessionRunAlert();
+}
+
 export function handleOcEvent(event) {
     const type = event.type || event.name || '';
     const props = event.properties || event.data || event;
@@ -357,10 +390,15 @@ export function handleOcEvent(event) {
         // busy/retry 属于非终止事件（event）：遵守本地发送/停止的保护窗口。
         const normalized = normalizeStatuses({ [eventSid]: props.status || props })[eventSid];
         if (normalized != null) {
+            const wasBusy = isBusyStatus(store.sessionStatuses[eventSid]);
             if (isBusyStatus(normalized)) {
                 setSessionStatus(eventSid, normalized, 'event');
+                clearSessionRunAlert(eventSid);
+                if (!wasBusy) notifySessionRunAlert();
             } else {
                 setSessionStatus(eventSid, normalized, 'terminal');
+                // 没有 finishType 的 idle 也要让后台 Tab 的蓝点消失。
+                notifySessionRunAlert();
             }
         }
         if (eventSid === store.currentSessionId) {
@@ -379,8 +417,14 @@ export function handleOcEvent(event) {
         return;
     }
     if (type === 'session.idle' && eventSid) {
+        // execution.* 转换出的 idle 带 finishType；后台 Tab 据此显示一次性终态点。
+        const finishType = event.finishType || props.finishType;
         delete store.sessionErrors[eventSid];
         setSessionStatus(eventSid, 'idle', 'terminal');
+        // 必须在状态写为 idle 之后再标记：Tab 重绘时 running 优先于 alert，
+        // 若先标记，重绘会用旧的 busy 状态画成蓝点。
+        if (finishType) markSessionRunAlert(eventSid, finishType);
+        else notifySessionRunAlert();
         if (eventSid === store.currentSessionId) {
             loadMessages();
             refreshSessionTitle();
