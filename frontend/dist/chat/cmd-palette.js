@@ -428,19 +428,20 @@ function renderForkList(query) {
     });
 }
 
-/** 从指定消息分叉：POST fork → 打开新 tab + 刷新树 */
-async function forkFromMessage(messageID) {
-    if (!forkSessionId || !messageID) return;
-    // 先保存 id：hideForkPicker() 会清空 forkSessionId，避免路径变成 /session//fork
-    const sid = forkSessionId;
-    hideForkPicker();
+/** 在指定会话的某条消息处创建分支（/fork 弹窗与消息卡片操作行共用）。
+ *  直接走通用 OpenCodeAPI：v2 端点是 POST /api/session/{id}/fork，
+ *  before 传该消息 id，响应是 {data: Session.Info} 信封。
+ *  成功返回新会话 id；失败返回 null（已经 toast + console 记录）。 */
+export async function forkSessionAt(sessionId, messageID) {
+    if (!sessionId || !messageID) return null;
     let raw = null;
     try {
         showToast('正在分叉...', 'info');
-        // 直接走 OpenCodeAPI，便于诊断非 JSON 响应（HTML/错误页）
-        // v2：路径收拢到 /api；分叉点参数由 v1 的 messageID 改为 before（在该消息之前分叉）；
-        // 响应是 {data: Session.Info} 信封。
-        raw = await api.OpenCodeAPI('POST', `/api/session/${encodeURIComponent(sid)}/fork`, JSON.stringify({ before: messageID }));
+        raw = await api.OpenCodeAPI(
+            'POST',
+            `/api/session/${encodeURIComponent(sessionId)}/fork`,
+            JSON.stringify({ before: messageID })
+        );
         if (!raw || !raw.success) {
             throw new Error((raw && (raw.error || `HTTP ${raw.status}`)) || '未知错误');
         }
@@ -450,19 +451,28 @@ async function forkFromMessage(messageID) {
             openSessionTab(result.id, result.title || result.id);
             await buildTree();
             showToast('已分叉新会话', 'success');
-        } else {
-            showToast('分叉失败：未返回新会话', 'error');
+            return result.id;
         }
+        showToast('分叉失败：未返回新会话', 'error');
+        return null;
     } catch (e) {
-        // 诊断：追加请求路径、响应状态码与 body 片段，便于定位 HTML/错误页响应
-        const reqPath = `/api/session/${sid}/fork`;
         const status = raw ? ` [status=${raw.status}]` : '';
         const snippet = raw && raw.body && typeof raw.body === 'string'
             ? ` body=${raw.body.slice(0, 120)}`
             : '';
-        console.error('[fork] 请求路径:', reqPath, 'messageID:', messageID, 'raw:', raw, '错误:', e);
+        console.error('[fork] 失败:', 'sessionID:', sessionId, 'messageID:', messageID, 'raw:', raw, e);
         showToast('分叉失败: ' + formatApiError(e) + status + snippet, 'error');
+        return null;
     }
+}
+
+/** 从弹窗选中的消息分叉（弹窗态包装：先取会话 id 再收起弹窗） */
+async function forkFromMessage(messageID) {
+    if (!forkSessionId || !messageID) return;
+    // 先保存 id：hideForkPicker() 会清空 forkSessionId，避免路径变成 /session//fork
+    const sid = forkSessionId;
+    hideForkPicker();
+    await forkSessionAt(sid, messageID);
 }
 
 /** 打开 fork 消息选择弹窗（只列用户消息，基于已加载 + 可加载更早） */

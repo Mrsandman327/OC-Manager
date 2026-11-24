@@ -570,7 +570,9 @@ function tryAppendNewMessages(box, list, scrollAnchor, followBottom) {
 
 /** 取一条消息里可操作的正文字本：只拼 text part（思考/工具/附件都不算）。 */
 export function messageActionText(item) {
-    const parts = (item && item.parts) || [];
+    // 与渲染层一致，先按 part id 排序：Web 端事件可能乱序到达，
+    // 直接按数组顺序拼会导致复制/引用得到的长文本前后颠倒。
+    const parts = sortParts((item && item.parts) || []);
     return parts
         .filter(p => p && p.type === 'text' && typeof p.text === 'string')
         .map(p => p.text)
@@ -578,14 +580,18 @@ export function messageActionText(item) {
         .trim();
 }
 
-/** 计算「每一轮最后一条 assistant 消息」的 id 集合。
- *  一轮从一条 assistant 开始，到下一条非 system 消息不是 assistant 为止；
- *  只有该轮最后一条 assistant 才代表这一轮的最终输出。 */
-function computeFinalAssistantIds(list) {
-    const ids = new Set();
+/** 一次遍历同时算出两个集合（避免每次同步按钮都扫两遍消息列表）：
+ *  - finalIds：「每一轮最后一条 assistant」的 id。一轮从一条 assistant 开始，
+ *    到下一条非 system 消息不是 assistant 为止；
+ *  - textIds：存在正文 part 的 assistant id（纯工具/思考收尾的轮次不能挂按钮）。 */
+function computeAssistantActionInfo(list) {
+    const finalIds = new Set();
+    const textIds = new Set();
     for (let i = 0; i < list.length; i++) {
         const info = list[i].info || list[i];
         if (info.role !== 'assistant' || !info.id) continue;
+        const id = String(info.id);
+        if (messageActionText(list[i])) textIds.add(id);
         let j = i + 1;
         let nextRole = '';
         while (j < list.length) {
@@ -594,12 +600,12 @@ function computeFinalAssistantIds(list) {
             nextRole = nextInfo.role || '';
             break;
         }
-        if (nextRole !== 'assistant') ids.add(String(info.id));
+        if (nextRole !== 'assistant') finalIds.add(id);
     }
-    return ids;
+    return { finalIds, textIds };
 }
 
-/** 生成卡片外部下方的操作行。事件统一由 chat/message-actions.js 委托处理。 */
+/** 生成卡片内部最底部的操作行。事件统一由 chat/message-actions.js 委托处理。 */
 function buildMessageActionsRow(role) {
     const row = document.createElement('div');
     row.className = 'oc-msg-actions';
@@ -616,20 +622,15 @@ function buildMessageActionsRow(role) {
  *  - 用户消息：全部显示「复制 / 引用 / 分叉」；
  *  - 助手消息：只在该轮最后一条 assistant（有正文）上显示「复制 / 引用 / 收藏」；
  *  - 过程区块（思考、工具）不渲染任何按钮。
- *  操作行绝对定位在卡片外部下方，卡片本身用 has-msg-actions 让出 22px 空间。
+ *  操作行是卡片文档流里的最后一行（append 到 .oc-message 末尾），
+ *  卡片高度自然增加，不需要任何额外外边距让位。
  *  在 renderMessages 的每个出口调用一次，覆盖增量 / 流式 / 全量三条路径。 */
 export function syncMessageActions(box, list) {
     if (!box) return;
     const sid = (box.dataset && box.dataset.tab) || store.currentSessionId || '';
-    const finalIds = computeFinalAssistantIds(list || []);
-    // 只有存在正文的助手消息才挂按钮：纯工具/思考收尾的轮次没有可复制的内容
-    const textIds = new Set();
-    (list || []).forEach(function (item) {
-        const info = item.info || item;
-        if (info.role === 'assistant' && info.id && messageActionText(item)) {
-            textIds.add(String(info.id));
-        }
-    });
+    const info = computeAssistantActionInfo(list || []);
+    const finalIds = info.finalIds;
+    const textIds = info.textIds;
     const nodes = box.querySelectorAll('.oc-message');
     for (let i = 0; i < nodes.length; i++) {
         const node = nodes[i];
@@ -640,7 +641,6 @@ export function syncMessageActions(box, list) {
         let row = node.querySelector(':scope > .oc-msg-actions');
         if (!show) {
             if (row) row.remove();
-            node.classList.remove('has-msg-actions');
             continue;
         }
         if (!row) {
@@ -649,7 +649,6 @@ export function syncMessageActions(box, list) {
         }
         row.dataset.messageId = id;
         row.dataset.sessionId = sid;
-        node.classList.add('has-msg-actions');
     }
 }
 

@@ -1,16 +1,15 @@
 // ============================================================
-// chat/message-actions.js — 消息卡片外部的操作行
+// chat/message-actions.js — 消息卡片内部最底部的操作行
 // 用户消息：复制 / 引用 / 分叉
 // 助手最终正文：复制 / 引用 / 收藏到知识库
 // ============================================================
 
-import { api } from '../core/apicall.js';
 import { store } from '../core/state.js';
-import { getCachedMessages, copyToClipboard, showToast, showApiError } from '../core/utils.js';
+import { getCachedMessages, copyToClipboard, showToast } from '../core/utils.js';
 import { selectSession } from './session.js';
-import { openSessionTab } from './tabs.js';
 import { messageActionText } from './render.js';
-import { refreshTree } from './tree.js';
+// 分叉逻辑与命令面板 /fork 共用一份实现，避免两处各写一遍请求与响应解析
+import { forkSessionAt } from './cmd-palette.js';
 import { openKbEntryModal } from '../views/knowledge.js';
 
 /** 在指定会话的消息缓存里按 id 找消息条目。 */
@@ -38,10 +37,27 @@ function quoteToPrompt(text) {
     return true;
 }
 
-/** 收藏标题：取正文第一行，超过 30 字截断。 */
+/** 收藏标题：取正文第一行，去掉常见 Markdown 标记后截断 30 字。
+ *  只做行内清理，不引入 Markdown 解析器：
+ *  标题井号、引用、列表符号、链接、图片、行内代码、加粗/斜体、删除线。 */
 function collectTitle(text) {
     const first = (text.split('\n').find(function (line) { return line.trim(); }) || '').trim();
-    return first.length > 30 ? first.slice(0, 30) + '…' : first;
+    const cleaned = first
+        .replace(/^#{1,6}\s+/, '')                        // 标题
+        .replace(/^>\s*/, '')                            // 引用
+        .replace(/^[-*+]\s+/, '')                        // 无序列表
+        .replace(/^\d+[.)]\s+/, '')                      // 有序列表
+        .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')      // 图片 → alt
+        .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')       // 链接 → 文本
+        .replace(/`{1,3}([^`]*)`{1,3}/g, '$1')          // 行内代码
+        .replace(/\*\*(.+?)\*\*/g, '$1')                // 加粗
+        .replace(/\*(.+?)\*/g, '$1')                     // 斜体（仅 *，避免误伤 snake_case）
+        .replace(/~~(.+?)~~/g, '$1')                      // 删除线
+        .replace(/\s+/g, ' ')                            // 折叠空白
+        .trim();
+    // 清理后为空（例如首行只有一张图片）就留空，交给用户在弹窗里填
+    const title = cleaned;
+    return title.length > 30 ? title.slice(0, 30) + '…' : title;
 }
 
 /** 点击操作按钮：所有动作都从当前会话缓存里取原文，避免把大段文本塞进 DOM 属性。 */
@@ -84,20 +100,9 @@ export async function handleMessageActionClick(event) {
         if (!messageId) { showToast('找不到这条消息', 'error'); return; }
         btn.disabled = true;
         try {
-            // before 传选中的用户消息 id，服务端据此复制该消息之前（含该消息边界）的历史
-            const res = await api.ForkSession(sessionId, messageId);
-            if (!res || res.success === false) {
-                throw new Error((res && res.error) || '分支失败');
-            }
-            const newId = res.body || '';
-            if (!newId) throw new Error('分支会话没有返回会话 id');
-            const baseTitle = (store.sessionMap && store.sessionMap[sessionId] && store.sessionMap[sessionId].title) || '会话';
-            showToast('已创建分支会话', 'success');
-            openSessionTab(newId, baseTitle + ' (分支)');
-            await selectSession(newId);
-            refreshTree();
-        } catch (e) {
-            showApiError('创建分支失败: ', e);
+            // 与命令面板 /fork 共用 forkSessionAt：请求、响应解析、打开 tab、刷新树都在那里
+            const newId = await forkSessionAt(sessionId, messageId);
+            if (newId) await selectSession(newId);
         } finally {
             btn.disabled = false;
         }

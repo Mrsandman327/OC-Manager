@@ -323,12 +323,6 @@ func (a *App) callFrontendMethod(method string, args []json.RawMessage) (interfa
 			return nil, err
 		}
 		return a.AnswerQuestion(sessionID, answers), nil
-	case "ForkSession":
-		var sessionID, beforeMessageID string
-		if err := decodeArgs(args, &sessionID, &beforeMessageID); err != nil {
-			return nil, err
-		}
-		return a.ForkSession(sessionID, beforeMessageID), nil
 	case "OpenDirectoryDialog":
 		return a.OpenDirectoryDialog(), nil
 	case "OpenDirectoryDialogAt":

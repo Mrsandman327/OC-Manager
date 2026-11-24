@@ -606,27 +606,25 @@ oc-context-menu::part(icon-import) {
     text-align: left;
     font-family: "SF Mono", "Cascadia Code", monospace;
 }
-/* ===== 消息卡片外部的操作行 =====
-   操作行绝对定位在卡片正下方；卡片用 has-msg-actions 让出 22px 外边距，
-   避免按钮压住下一条消息，也不改变卡片内部的任何排版。
-   用户消息右对齐，助手消息左对齐，与各自卡片边缘对齐。 */
-.oc-message.has-msg-actions {
-    margin-bottom: 22px;
-}
+/* ===== 消息卡片内部的操作行 =====
+   操作行是卡片文档流里的最后一行（render.js 里 append 到 .oc-message 末尾），
+   因此卡片高度自然多出一行，不需要任何外边距让位，也不会压住下一条消息。
+   用户消息右对齐，助手消息左对齐；与正文拉开 9px，贴住卡片底部。 */
 .oc-msg-actions {
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: -22px;
-    height: 20px;
     display: flex;
     align-items: center;
     gap: 4px;
+    height: 22px;
+    margin-top: 9px;
+    margin-bottom: -4px;
     opacity: 0.6;
     transition: opacity 0.12s ease;
 }
 .oc-message.user .oc-msg-actions {
     justify-content: flex-end;
+    /* 用户消息通常只有一两行，9px 与正文的间距显得空；单独收到 0px，
+       助手卡片仍保持 9px（正文 / token 行之后的间距更合适）。 */
+    margin-top: 0px;
 }
 .oc-msg-action {
     width: 22px;
@@ -642,7 +640,10 @@ oc-context-menu::part(icon-import) {
     cursor: pointer;
     transition: color 0.12s ease;
 }
-/* 悬停只变色，不加底色或边框 */
+/* 悬停只变色，不加底色或边框；悬浮整张卡片时整组稍微清晰一点 */
+.oc-message:hover .oc-msg-actions {
+    opacity: 0.9;
+}
 .oc-msg-action:hover:not(:disabled) {
     color: var(--text-primary);
 }
@@ -661,8 +662,7 @@ oc-context-menu::part(icon-import) {
 }
 /* 触屏与窄屏：按钮放大、常显，便于点按 */
 @media (hover: none), (max-width: 768px) {
-    .oc-message.has-msg-actions { margin-bottom: 26px; }
-    .oc-msg-actions { bottom: -26px; height: 24px; opacity: 0.8; }
+    .oc-msg-actions { height: 26px; gap: 6px; opacity: 0.75; }
     .oc-msg-action { width: 26px; height: 26px; }
     .oc-msg-action svg { width: 15px; height: 15px; }
 }

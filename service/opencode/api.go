@@ -276,44 +276,6 @@ func findPendingForm(base, sessionID, directory, password string) (*formInfo, er
 	return nil, fmt.Errorf("未找到该会话的待回答表单")
 }
 
-// ForkSession 以指定消息为分界复制会话历史，创建分支会话，返回新会话 id。
-// v2 端点：POST /api/session/{sessionID}/fork，body {"before": "<messageID>"}。
-// before 传用户消息 id；传空表示复制整个会话历史。
-func ForkSession(sessionID, beforeMessageID string) model.APIResult {
-	sess := getWebSession()
-	if sess == nil {
-		return model.APIResult{Error: "opencode 服务未启动"}
-	}
-	base, err := getWebSessionBase()
-	if err != nil {
-		return model.APIResult{Error: err.Error()}
-	}
-
-	payload := map[string]any{}
-	if beforeMessageID != "" {
-		payload["before"] = beforeMessageID
-	}
-	body, _ := json.Marshal(payload)
-
-	forkURL := base + "/api/session/" + url.PathEscape(sessionID) + "/fork"
-	result := apiPost(forkURL, sess.password, body)
-	if !result.Success {
-		return result
-	}
-
-	// 响应是 {data: {...}} 信封：取出新会话 id 交给前端打开。
-	var outer struct {
-		Data struct {
-			ID    string `json:"id"`
-			Title string `json:"title"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal([]byte(result.Body), &outer); err != nil || outer.Data.ID == "" {
-		return model.APIResult{Status: result.Status, Error: "分支会话已创建，但响应里没有会话 id"}
-	}
-	return model.APIResult{Success: true, Status: result.Status, Body: outer.Data.ID}
-}
-
 // AnswerQuestion 回答表单（v1 形态的 question 工具）。
 // answers 为按问题顺序的二维数组（每个问题一个 string[]，支持多选与自定义输入）；
 // v2 的表单按字段 key 提交，因此这里按下标把 answers 映射到各字段的 key。
