@@ -1161,7 +1161,9 @@ button.file-browser-upload-plus:hover:not(:disabled) {
 .fb-terminal.collapsed .fb-terminal-body { display: none; }
 /* 折叠时只剩标题条，抓手没有意义 */
 .fb-terminal.collapsed .fb-terminal-grip { display: none; }
-/* 顶部拖拽抓手：绝对定位在抽屉上边框，不占布局高度 */
+/* 顶部拖拽抓手：绝对定位在抽屉上边框，不占布局高度。
+   视觉与文件列表 / Git 分隔条保持一致：平时完全透明，悬浮或拖拽时
+   只显示一条 2px 强调线，不再是整条染色块。 */
 .fb-terminal-grip {
     position: absolute;
     top: -3px;
@@ -1171,11 +1173,24 @@ button.file-browser-upload-plus:hover:not(:disabled) {
     z-index: 6;
     cursor: ns-resize;
     background: transparent;
-    transition: background 0.12s ease;
 }
-.fb-terminal-grip:hover,
-body.fb-term-resizing .fb-terminal-grip {
-    background: rgba(64, 128, 255, 0.55);
+.fb-terminal-grip::before {
+    content: '';
+    position: absolute;
+    left: 12px;
+    right: 12px;
+    top: 50%;
+    height: 2px;
+    transform: translateY(-50%);
+    background: var(--border);
+    border-radius: 1px;
+    opacity: 0;
+    transition: opacity 0.15s ease, background 0.15s ease;
+}
+.fb-terminal-grip:hover::before,
+body.fb-term-resizing .fb-terminal-grip::before {
+    opacity: 1;
+    background: var(--accent);
 }
 /* 拖拽期间禁用文本选中与终端鼠标事件，避免选中文字/输入焦点丢失 */
 body.fb-term-resizing {
