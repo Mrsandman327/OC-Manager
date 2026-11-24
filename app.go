@@ -534,6 +534,11 @@ func (a *App) AnswerQuestion(sessionID string, answers [][]string) model.APIResu
 	return opencode.AnswerQuestion(sessionID, answers)
 }
 
+// ForkSession 以指定用户消息为分界创建分支会话，返回新会话 id。
+func (a *App) ForkSession(sessionID, beforeMessageID string) model.APIResult {
+	return opencode.ForkSession(sessionID, beforeMessageID)
+}
+
 // GetProjectTree 获取项目→目录→会话的树形结构 JSON。
 func (a *App) GetProjectTree(knownDirs string) string {
 	return opencode.GetProjectTree(knownDirs)

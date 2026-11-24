@@ -606,6 +606,66 @@ oc-context-menu::part(icon-import) {
     text-align: left;
     font-family: "SF Mono", "Cascadia Code", monospace;
 }
+/* ===== 消息卡片外部的操作行 =====
+   操作行绝对定位在卡片正下方；卡片用 has-msg-actions 让出 22px 外边距，
+   避免按钮压住下一条消息，也不改变卡片内部的任何排版。
+   用户消息右对齐，助手消息左对齐，与各自卡片边缘对齐。 */
+.oc-message.has-msg-actions {
+    margin-bottom: 22px;
+}
+.oc-msg-actions {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -22px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    opacity: 0.6;
+    transition: opacity 0.12s ease;
+}
+.oc-message.user .oc-msg-actions {
+    justify-content: flex-end;
+}
+.oc-msg-action {
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-xs);
+    background: transparent;
+    color: var(--text-muted);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: color 0.12s ease;
+}
+/* 悬停只变色，不加底色或边框 */
+.oc-msg-action:hover:not(:disabled) {
+    color: var(--text-primary);
+}
+.oc-msg-action:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+.oc-msg-action svg {
+    width: 13px;
+    height: 13px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+/* 触屏与窄屏：按钮放大、常显，便于点按 */
+@media (hover: none), (max-width: 768px) {
+    .oc-message.has-msg-actions { margin-bottom: 26px; }
+    .oc-msg-actions { bottom: -26px; height: 24px; opacity: 0.8; }
+    .oc-msg-action { width: 26px; height: 26px; }
+    .oc-msg-action svg { width: 15px; height: 15px; }
+}
 .oc-message pre {
     white-space: pre-wrap;
     word-break: break-word;

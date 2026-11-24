@@ -555,6 +555,8 @@ function tryAppendNewMessages(box, list, scrollAnchor, followBottom) {
     // 旧 DOM 没有变化，新消息只追加在末尾，不需要重写 scrollTop：
     // 重写会打断搜索/用户平滑滚动，并可能让滚动监听把瞬时位置误判为“到顶”
     // 而触发 loadOlderMessages。只有原本贴底且不在搜索导航保护期时才跟随到底。
+    // 先补操作行（会改变卡片下边距），再恢复滚动，避免贴底时差出按钮那一截高度
+    syncMessageActions(box, list);
     if (followBottom && !isSearchScrollLocked((box.dataset && box.dataset.tab) || '')) {
         restoreScrollAnchor(box, scrollAnchor, true);
     }
@@ -564,6 +566,91 @@ function tryAppendNewMessages(box, list, scrollAnchor, followBottom) {
     if (renderTodosHandler) renderTodosHandler();
     updateUserNav();
     return true;
+}
+
+/** 取一条消息里可操作的正文字本：只拼 text part（思考/工具/附件都不算）。 */
+export function messageActionText(item) {
+    const parts = (item && item.parts) || [];
+    return parts
+        .filter(p => p && p.type === 'text' && typeof p.text === 'string')
+        .map(p => p.text)
+        .join('\n\n')
+        .trim();
+}
+
+/** 计算「每一轮最后一条 assistant 消息」的 id 集合。
+ *  一轮从一条 assistant 开始，到下一条非 system 消息不是 assistant 为止；
+ *  只有该轮最后一条 assistant 才代表这一轮的最终输出。 */
+function computeFinalAssistantIds(list) {
+    const ids = new Set();
+    for (let i = 0; i < list.length; i++) {
+        const info = list[i].info || list[i];
+        if (info.role !== 'assistant' || !info.id) continue;
+        let j = i + 1;
+        let nextRole = '';
+        while (j < list.length) {
+            const nextInfo = list[j].info || list[j];
+            if (nextInfo.role === 'system') { j++; continue; }
+            nextRole = nextInfo.role || '';
+            break;
+        }
+        if (nextRole !== 'assistant') ids.add(String(info.id));
+    }
+    return ids;
+}
+
+/** 生成卡片外部下方的操作行。事件统一由 chat/message-actions.js 委托处理。 */
+function buildMessageActionsRow(role) {
+    const row = document.createElement('div');
+    row.className = 'oc-msg-actions';
+    const acts = role === 'user'
+        ? [['copy', '复制', 'i-act-copy'], ['quote', '引用', 'i-act-reply'], ['fork', '分叉', 'i-act-fork']]
+        : [['copy', '复制', 'i-act-copy'], ['quote', '引用', 'i-act-reply'], ['collect', '收藏到知识库', 'i-act-book']];
+    row.innerHTML = acts.map(function (a) {
+        return '<button type="button" class="oc-msg-action" data-act="' + a[0] + '" title="' + a[1] + '">' + iconSvg(a[2]) + '</button>';
+    }).join('');
+    return row;
+}
+
+/** 同步消息卡片的操作行：
+ *  - 用户消息：全部显示「复制 / 引用 / 分叉」；
+ *  - 助手消息：只在该轮最后一条 assistant（有正文）上显示「复制 / 引用 / 收藏」；
+ *  - 过程区块（思考、工具）不渲染任何按钮。
+ *  操作行绝对定位在卡片外部下方，卡片本身用 has-msg-actions 让出 22px 空间。
+ *  在 renderMessages 的每个出口调用一次，覆盖增量 / 流式 / 全量三条路径。 */
+export function syncMessageActions(box, list) {
+    if (!box) return;
+    const sid = (box.dataset && box.dataset.tab) || store.currentSessionId || '';
+    const finalIds = computeFinalAssistantIds(list || []);
+    // 只有存在正文的助手消息才挂按钮：纯工具/思考收尾的轮次没有可复制的内容
+    const textIds = new Set();
+    (list || []).forEach(function (item) {
+        const info = item.info || item;
+        if (info.role === 'assistant' && info.id && messageActionText(item)) {
+            textIds.add(String(info.id));
+        }
+    });
+    const nodes = box.querySelectorAll('.oc-message');
+    for (let i = 0; i < nodes.length; i++) {
+        const node = nodes[i];
+        const isUser = node.classList.contains('user');
+        const isAssistant = node.classList.contains('assistant');
+        const id = node.dataset.messageId || '';
+        const show = isUser || (isAssistant && finalIds.has(id) && textIds.has(id));
+        let row = node.querySelector(':scope > .oc-msg-actions');
+        if (!show) {
+            if (row) row.remove();
+            node.classList.remove('has-msg-actions');
+            continue;
+        }
+        if (!row) {
+            row = buildMessageActionsRow(isUser ? 'user' : 'assistant');
+            node.appendChild(row);
+        }
+        row.dataset.messageId = id;
+        row.dataset.sessionId = sid;
+        node.classList.add('has-msg-actions');
+    }
 }
 
 /** 渲染完整消息列表（支持增量更新、滚动保持、移动端截断）
@@ -643,11 +730,17 @@ export function renderMessages(items, targetBox) {
                         if (focusSelector) restoreFocusState(body, focusSelector);
                     }
                     doUpdateModelInfo(list);
+                    // 这一条已完成（有完成时间）才补操作行：仍在流式输出时保持无按钮，
+                    // 避免每一帧都改变卡片高度、把滚动锚点一点点推走。
+                    const streamDone = last.info && last.info.time && last.info.time.completed;
+                    if (streamDone) syncMessageActions(box, list);
                     // 搜索导航后的保护期内不重写 scrollTop，避免打断搜索平滑滚动
                     if (!isSearchScrollLocked(busySid)) restoreScrollAnchor(box, scrollAnchor, followBottom);
                     updateScrollBottomButton();
                     // 末条消息被重建/追加片段：只重扫该消息，其他消息高亮不受影响
                     syncSearchAfterRender({ kind: 'message', box, messageEl: lastMsg, messageId: lastId, items: [last] });
+                    // 流式期间不同步操作行：消息未完成，按钮会让卡片高度在每一帧变化，
+                    // 滚动锚点因此不断漂移。等这一轮结束后的增量/全量渲染再补上。
                     return;
                 }
             }
@@ -668,6 +761,9 @@ export function renderMessages(items, targetBox) {
     appendSessionErrorRowIfNeeded(box, list);
 
     doUpdateModelInfo(items);
+    // 先补操作行，再恢复滚动：按钮行会让最后一条卡片多出 22px，
+    // 若在恢复之后再插入，贴底状态会立刻偏出这一段高度。
+    syncMessageActions(box, list);
     // 搜索导航后的保护期内不重写 scrollTop，避免打断搜索平滑滚动
     if (!isSearchScrollLocked(renderSid)) restoreScrollAnchor(box, scrollAnchor, followBottom);
     updateScrollBottomButton();

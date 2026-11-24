@@ -56,6 +56,7 @@ import {
     loadSkillsData, renderSkillList, bindSkillManagerEvents,
 } from './views/skill-manager.js';
 import { bindKnowledgeEvents } from './views/knowledge.js';
+import { bindMessageActions } from './chat/message-actions.js';
 import { loadProviders } from './views/provider.js';
 // MCP 连接器配置弹窗（全局 mcp.servers，入口在模型服务工具栏）
 import { initMcpConfig } from './views/mcp-config.js';
@@ -352,6 +353,8 @@ function initMain() {
     // （数据在切换到「知识库」时按需加载，见 chat/navigation.js）
     // ========================
     bindKnowledgeEvents();
+    // 消息卡片操作行（复制 / 引用 / 分叉 / 收藏）：绑定在消息池上，所有 tab 共用
+    bindMessageActions();
 
     // ========================
     // 供应商配置事件绑定

@@ -574,11 +574,16 @@ function applyKbContentMode() {
 
 /**
  * 打开编辑弹窗。
- * @param {string|null} id 条目 id；为空表示新建（空白态）
+ * @param {string|null} id 条目 id；为空表示新建
+ * @param {object} [preset] 新建时的预填内容 { title, summary, content }
+ *   （用于「收藏到知识库」：带正文打开弹窗，说明/分类/标签由用户补充）
  */
-export async function openKbEntryModal(id) {
+export async function openKbEntryModal(id, preset) {
     var modal = $('#kbEntryModal');
     if (!modal) return;
+
+    // 预填只在新建（id 为空）时生效；编辑已存在条目时始终以磁盘内容为准
+    var prefill = (!id && preset) ? preset : null;
 
     var entry = null;
     if (id) {
@@ -599,14 +604,14 @@ export async function openKbEntryModal(id) {
     if (titleEl) titleEl.textContent = entry ? '编辑条目' : '新建条目';
 
     var titleInput = $('#kbEntryTitle');
-    if (titleInput) titleInput.value = entry ? (entry.title || '') : '';
+    if (titleInput) titleInput.value = entry ? (entry.title || '') : (prefill ? (prefill.title || '') : '');
 
     // 说明：用户手填的短文本，列表 / 卡片视图展示这条
     var summaryInput = $('#kbEntrySummary');
-    if (summaryInput) summaryInput.value = entry ? (entry.summary || '') : '';
+    if (summaryInput) summaryInput.value = entry ? (entry.summary || '') : (prefill ? (prefill.summary || '') : '');
 
     var contentInput = $('#kbEntryContent');
-    if (contentInput) contentInput.value = entry ? (entry.content || '') : '';
+    if (contentInput) contentInput.value = entry ? (entry.content || '') : (prefill ? (prefill.content || '') : '');
 
     // 每次打开都是干净状态，不残留上一次的红色错误框
     clearKbFieldErrors();
