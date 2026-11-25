@@ -1,4 +1,4 @@
-import { escapeAttr } from '../core/utils.js';
+import { escapeAttr } from '../core/escape.js';
 
 // ============================================================
 // oc-button 自定义元素（Shadow DOM）

@@ -9,8 +9,12 @@ import { formatApiError } from './v2compat.js';
 import { showToast } from '../components/toast.js';
 // 空态统一用 components/empty.js 生成（结构与样式见 css/empty.css）
 import { emptyHtml } from '../components/empty.js';
+// HTML 转义等纯函数已移到 core/escape.js。
+// 这里同时导入（本文件内部还要用）并原样转出（既有模块仍从 utils 导入），作为兼容层。
+import { escapeHtml, escapeAttr, safeText } from './escape.js';
 
 export { showToast };
+export { escapeHtml, escapeAttr, safeText };
 
 // DOM 快捷引用
 export const $ = (sel) => document.querySelector(sel);
@@ -21,19 +25,6 @@ export const $$ = (sel) => document.querySelectorAll(sel);
  *  v2 错误体里可读的 message（解析逻辑见 core/v2compat.js 的 formatApiError）。 */
 export function showApiError(prefix, e) {
     showToast((prefix || '') + formatApiError(e), 'error');
-}
-
-// HTML 转义
-export function escapeHtml(text) {
-    if (text == null) return '';
-    const div = document.createElement('div');
-    div.textContent = String(text);
-    return div.innerHTML;
-}
-
-/** HTML 属性值转义：在 escapeHtml 基础上补引号转义，用于 title="..." 等属性上下文 */
-export function escapeAttr(text) {
-    return escapeHtml(text).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // 剪贴板
@@ -458,13 +449,6 @@ export function makeMessageCursor(messageID) {
 // 原属 chat/service.js，为打破 service.js ↔ render.js 循环依赖，
 // 统一移入 utils.js（均为纯函数，只操作入参，无 DOM/状态依赖）。
 // ============================================================
-
-/** 安全转文本（处理 null/undefined/对象） */
-export function safeText(value) {
-    if (value == null) return '';
-    if (typeof value === 'string') return value;
-    return JSON.stringify(value, null, 2);
-}
 
 /** 从 part 对象中提取文本内容 */
 export function extractPartText(part) {

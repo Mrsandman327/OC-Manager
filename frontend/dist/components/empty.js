@@ -20,7 +20,7 @@
 //   emptyHtml({ title: '加载失败: ' + msg, variant: 'error' })
 //   emptyHtml({ title: '请选择目录', size: 'sm' })
 
-import { escapeAttr } from '../core/utils.js';
+import { escapeAttr } from '../core/escape.js';
 import { buttonHtml } from './oc-button.js';
 
 /**
