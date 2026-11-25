@@ -616,6 +616,17 @@ export async function openKbEntryModal(id, preset) {
     // 每次打开都是干净状态，不残留上一次的红色错误框
     clearKbFieldErrors();
 
+    // 从聊天页「收藏」等入口打开时，知识库视图可能还没加载过分类，
+    // 此时 kbState.categories 为空，下拉里只剩「未分类」。这里按需补拉一次。
+    if (!kbState.categories.length) {
+        try {
+            kbState.categories = (await api.KnowledgeCategories()) || [];
+            kbCollapseAllParents(kbState.categories);
+        } catch (e) {
+            // 分类拉取失败不影响新建条目，保持「未分类」即可
+        }
+    }
+
     fillKbCatSelect();
     var catSelect = $('#kbEntryCat');
     if (catSelect) {
