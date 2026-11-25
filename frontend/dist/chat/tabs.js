@@ -12,7 +12,7 @@
 import { store } from '../core/state.js';
 import { escapeHtml, getTabMessagesEl, ensureTabMessagesEl, getCachedMessages, updateModelInfo, restoreSessionSelection, refreshServiceStatus } from '../core/utils.js';
 import { isMobileTreeMode } from './mobile.js';
-import { updateScrollBottomButton, updateSendButton, isBusyStatus } from './render.js';
+import { updateScrollBottomButton, updateSendButton, isBusyStatus, maybeTrimMessages } from './render.js';
 import { refreshSessionStatusFromActive } from './events.js';
 import { refreshSubtaskPanel } from './sidepanel.js';
 import { refreshSchedulePanel } from './schedules.js';
@@ -172,6 +172,8 @@ export function activateTabContainer(sessionID) {
 /** 切换活动 Tab（多容器方案）：纯 display 显隐，各容器内容已实时渲染，切换零成本 */
 export function switchTab(sessionID) {
     if (!sessionID) return;
+    // 记录即将切走的会话：新会话激活后对它做一次内存裁剪检查（切走时机）。
+    const previousTabId = store.activeTabId;
     store.activeTabId = sessionID;
     store.currentSessionId = sessionID;
     // 切到该 Tab 即视为已看到结果：清除一次性终态提醒。
@@ -241,6 +243,14 @@ export function switchTab(sessionID) {
     // 搜索栏打开时，把搜索重新绑定到当前会话：
     // 旧 searchResults 属于上一个会话容器，继续导航会按旧坐标滚动新容器。
     restartSearchForActiveSession();
+
+    // 旧容器此刻已 display:none：对它做一次裁剪检查（切走时机）。
+    // 必须放在这里：前面已完成新会话的模型/选择器同步，
+    // doUpdateModelInfo 的「本会话已同步」守卫会生效，重建旧会话不会污染新会话的下拉框。
+    // 仅在旧会话贴底且缓存超限时生效；隐藏容器上的重建没有任何可见变化。
+    if (previousTabId && previousTabId !== sessionID) {
+        maybeTrimMessages(getTabMessagesEl(previousTabId), previousTabId);
+    }
 
     // 通知会话模块：切回后若标题仍是占位值需重启标题轮询。
     // 用事件而不是直接 import，避免 tabs↔session 循环依赖。

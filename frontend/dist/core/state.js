@@ -87,6 +87,15 @@ export const store = {
     // ============================
     /** 消息缓存，key=会话ID，value=消息数组 */
     messageCache: {},
+    /** 内存裁剪后待生效的分页游标，key=会话ID。
+     *  裁剪把最早若干条从缓存里删掉后，把游标指向「保留下来的第一条」，
+     *  下次上滑会先消费它，精确拉回被裁掉的那一段，历史保持连续。
+     *  游标格式见 core/utils.js 的 makeMessageCursor。 */
+    pagingCursorOverride: {},
+    /** 分页纪元，key=会话ID。裁剪时递增，
+     *  在途的分页请求回包后对比纪元不一致即丢弃，避免用裁剪前的游标把旧数据插回来。
+     *  与 pagingCursorOverride 配合，保证「删掉的能按顺序补回」。 */
+    pagingEpoch: {},
     /** 上一次渲染时的消息总数（用于增量更新判断） */
     lastMessageCount: 0,
     /** 上一次渲染时的原始消息总数（过滤前） */

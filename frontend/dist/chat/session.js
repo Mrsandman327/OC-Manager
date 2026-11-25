@@ -520,6 +520,15 @@ export async function loadOlderMessages(sessionID) {
         showToast(msg, 'info');
     };
     if (paging.loading) return;
+    // 内存裁剪留下的新游标：优先使用它，把被裁掉的头部精确接回来。
+    // 同时复位「已全部加载」—— 裁掉头部后会话又有更早内容可拉。
+    // 先不删除，等这次请求成功拿到页面后再清（失败要留着重试）。
+    const override = store.pagingCursorOverride[targetId];
+    if (override) {
+        paging.cursor = override;
+        paging.loadedAll = false;
+        paging.loadedAllReason = '';
+    }
     if (paging.loadedAll) { note('已经是最早的消息了'); return; }
     const cursor = paging.cursor;
     if (!cursor) {
@@ -529,10 +538,14 @@ export async function loadOlderMessages(sessionID) {
         return;
     }
     paging.loading = true;
+    // 记录请求发起时的分页纪元：期间若发生内存裁剪，纪元会递增，
+    // 这次回包携带的是裁剪前的游标位置，直接丢弃，避免把旧数据插回缓存造成错序。
+    const epoch = store.pagingEpoch[targetId] || 0;
     try {
         const res = await api.OpenCodeCall('GET', `/api/session/${encodeURIComponent(targetId)}/message?limit=${OLDER_MESSAGE_LIMIT}&cursor=${encodeURIComponent(cursor)}`);
         // 关闭标签会删除分页对象；旧回包不得写进重新打开的会话。
         if (sessionPaging[targetId] !== paging) return;
+        if (epoch !== (store.pagingEpoch[targetId] || 0)) return;
         const messages = adaptMessages(targetId, res);
         // 一次性诊断：成功取到更早消息时也给个反馈（便于确认"上滑确实命中了"）
         if (messages.length) {
@@ -546,8 +559,11 @@ export async function loadOlderMessages(sessionID) {
         const moreCursor = nextCursor(res);
         if (!messages.length) {
             paging.loadedAll = true; paging.loadedAllReason = '服务端返回空页';
+            if (override) delete store.pagingCursorOverride[targetId];
         } else {
             paging.cursor = moreCursor;
+            // 裁剪留下的临时游标已被这次请求消费，清掉避免下次覆盖正常游标。
+            if (override) delete store.pagingCursorOverride[targetId];
             prependMessages(targetId, messages);
             // 到顶判定必须看**原始页条数**：解析层会丢弃 idle/agent-switched 等边界消息，
             // 用解析后的条数会把"满页但被过滤了几条"误判成"不足一页 → 已到顶"。
@@ -623,6 +639,9 @@ export function releaseSessionRuntime(sessionID) {
     store.sessionLoadSeq[sessionID] = (store.sessionLoadSeq[sessionID] || 0) + 1;
     delete loadMessagesInflight[sessionID];
     delete sessionPaging[sessionID];
+    // 分页与裁剪状态一并释放：重开同一会话时它们是旧会话的残留。
+    delete store.pagingCursorOverride[sessionID];
+    delete store.pagingEpoch[sessionID];
 }
 
 export async function loadMessages(sessionID) {

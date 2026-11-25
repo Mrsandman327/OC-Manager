@@ -10,7 +10,7 @@
 // ============================================================
 
 import { store, currentDir } from '../core/state.js';
-import { escapeHtml, getActiveMessagesEl, showToast, showApiError, safeText, extractPartText, isInternalUserMessage, normalizeMessageItem, setUpdateModelInfoHandler, modelDisplayLabel, resolveKnownValue, syncVariantSelect } from '../core/utils.js';
+import { escapeHtml, getActiveMessagesEl, showToast, showApiError, safeText, extractPartText, isInternalUserMessage, normalizeMessageItem, setUpdateModelInfoHandler, modelDisplayLabel, resolveKnownValue, syncVariantSelect, makeMessageCursor } from '../core/utils.js';
 // Markdown 清洗统一走 core/sanitize.js 的白名单实现（含 href 协议校验）
 import { sanitizeMarkedHtml } from '../core/sanitize.js';
 // 本地图片：把 Markdown 里的 C:\... / file:// / 相对路径替换为 data URL
@@ -650,6 +650,91 @@ export function syncMessageActions(box, list) {
         row.dataset.messageId = id;
         row.dataset.sessionId = sid;
     }
+}
+
+// ============================
+// 长会话消息裁剪（内存控制）
+// ============================
+
+/** 单会话保留的消息上限（条）。 */
+const MESSAGE_CACHE_LIMIT = 100;
+/** 触发裁剪的阈值：超过它才裁，避免新增一条消息就裁一次。 */
+const MESSAGE_TRIM_TRIGGER = MESSAGE_CACHE_LIMIT + 10;
+/** 一次裁剪后的目标条数：比上限低 20，留出余量。 */
+const MESSAGE_TRIM_TARGET = MESSAGE_CACHE_LIMIT - 20;
+
+
+
+/**
+ * 检查并裁剪该会话最旧的消息。
+ *
+ * 只改缓存，不手工操作 DOM：
+ *   裁剪后「缓存条数 < DOM 条数」，下一次渲染必然走全量重建分支
+ *   （tryAppendNewMessages 要求缓存条数多于 DOM 条数才只追加）。
+ *   滚动位置、操作行、用户导航、搜索索引全部交给渲染层统一处理。
+ *
+ * 为了「删掉的最旧那批能被精确补回、且顺序不乱」，进入裁剪前做两件事：
+ *   1. 递增 sessionLoadSeq —— 让在途的全量刷新作废，
+ *      否则它带着裁剪前的完整列表回来会把删掉的消息又合并进去，顺序错乱。
+ *   2. 递增 pagingEpoch —— 让在途的分页请求作废（session.js 回包时对比纪元）。
+ *
+ * 执行条件：该会话贴底（用户正看着最新内容），且不在搜索中。
+ *
+ * @param {HTMLElement} box 该会话自己的消息容器
+ * @param {string} sid 会话 id
+ * @returns {boolean} 是否执行了裁剪
+ */
+export function maybeTrimMessages(box, sid) {
+    if (!box || !sid) return false;
+    // 用户按住鼠标（拖滚动条 / 选中文字）时不裁：
+    // 此时重建 DOM 会打断交互，且 renderMessages 本身也会因 userScrolling 提前返回，
+    // 造成「缓存已删、DOM 未重建」的短暂不一致。松手后下一次渲染再结算即可。
+    if (store.userScrolling) return false;
+    if (isSearchActive()) return false;
+    if (store.tabStickBottom[sid] === false) return false;
+
+    let list = store.messageCache[sid];
+    if (!Array.isArray(list) || list.length < MESSAGE_TRIM_TRIGGER) return false;
+
+    const removeCount = list.length - MESSAGE_TRIM_TARGET;
+    if (removeCount <= 0) return false;
+
+    // 先作废在途的全量刷新与分页请求。
+    // 裁剪前提是缓存已超过保留上限，因此不存在「首次加载被作废导致白屏」的情况。
+    store.sessionLoadSeq[sid] = (store.sessionLoadSeq[sid] || 0) + 1;
+    store.pagingEpoch[sid] = (store.pagingEpoch[sid] || 0) + 1;
+
+    // 缓存按「旧 → 新」维护（历史是 prepend、新消息是 push 尾部），头部即最旧。
+    // 不做排序：实测各会话均严格升序；而发送流程里「占位先建、用户消息后插」
+    // 天然会造成 1ms 的时间倒挂，按时间排序反而会把等待卡片排到用户输入上方。
+    const removed = list.slice(0, removeCount);
+    store.messageCache[sid] = list.slice(removeCount);
+
+    // 清理被删消息的折叠状态：消息已经不存在，展开记录留着只会越积越多。
+    const expanded = store.tabExpandedParts[sid];
+    if (expanded) {
+        for (let i = 0; i < removed.length; i++) {
+            const parts = Array.isArray(removed[i] && removed[i].parts) ? removed[i].parts : [];
+            for (let j = 0; j < parts.length; j++) {
+                if (parts[j] && parts[j].id) delete expanded[parts[j].id];
+            }
+        }
+    }
+
+    // 把分页游标指向「保留下来的第一条」：上滑时会先消费它，
+    // 精确拉回刚被裁掉的那一段，历史对用户来说仍然连续。
+    // pending_ 开头的本地占位消息服务端不认识，不能拿来当游标。
+    const keptHead = store.messageCache[sid][0];
+    const keptHeadID = String((keptHead && (keptHead.info?.id || keptHead.id)) || '');
+    if (keptHeadID && !keptHeadID.startsWith('pending_')) {
+        const override = makeMessageCursor(keptHeadID);
+        if (override) store.pagingCursorOverride[sid] = override;
+    }
+
+    // 主动重建一次：DOM 条数比缓存多，renderMessages 内部会走全量重建，
+    // 由它统一处理滚动、操作行、导航和搜索索引。
+    renderMessages(store.messageCache[sid], box);
+    return true;
 }
 
 /** 渲染完整消息列表（支持增量更新、滚动保持、移动端截断）

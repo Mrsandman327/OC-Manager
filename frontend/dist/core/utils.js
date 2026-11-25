@@ -435,6 +435,24 @@ export function getCachedMessages(sessionID) {
     return store.messageCache[sessionID];
 }
 
+/** 构造「更早分页」游标（v2 message.list 的 cursor 参数）。
+ *  实测服务端游标只是 base64url 编码的明文 JSON，没有签名，因此可以按消息 id 自造：
+ *      {"id":"<消息 id>","order":"desc","direction":"next"}
+ *  direction="next" 表示从该消息继续往更早翻（该消息本身不在结果里）。
+ *  内存裁剪后用它把游标指向「保留下来的第一条」，上滑即可精确补回被裁掉的头部。
+ *  @param {string} messageID 起始消息 id
+ *  @returns {string} base64url 游标；参数为空或编码失败时返回空串
+ */
+export function makeMessageCursor(messageID) {
+    if (!messageID) return '';
+    try {
+        const json = JSON.stringify({ id: messageID, order: 'desc', direction: 'next' });
+        return btoa(json).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    } catch (_) {
+        return '';
+    }
+}
+
 // ============================================================
 // 消息文本/结构纯函数
 // 原属 chat/service.js，为打破 service.js ↔ render.js 循环依赖，

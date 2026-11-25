@@ -9,7 +9,7 @@
 
 import { store } from '../core/state.js';
 import { getTabMessagesEl, getCachedMessages, normalizeMessageItem, isInternalUserMessage } from '../core/utils.js';
-import { renderMessages, isSessionBusy } from './render.js';
+import { renderMessages, isSessionBusy, maybeTrimMessages } from './render.js';
 
 // ============================
 // 消息缓存与渲染
@@ -194,6 +194,9 @@ export function scheduleRenderCachedMessages(sessionID) {
         var targets = Object.keys(_pendingRenderSessions);
         _pendingRenderSessions = {};
         targets.forEach(function(sid) {
+            // 先结算内存裁剪：裁剪本身会用最新缓存重建该容器，
+            // 因此裁掉了就不再重复渲染一次（同一帧只渲染一次）。
+            if (maybeTrimMessages(getTabMessagesEl(sid), sid)) return;
             renderCachedMessages(sid);
         });
     });
